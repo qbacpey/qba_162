@@ -10,9 +10,13 @@ struct file {
   bool deny_write;     /* Has file_deny_write() been called? */
 };
 
-/* Opens a file for the given INODE, of which it takes ownership,
-   and returns the new file.  Returns a null pointer if an
-   allocation fails or if INODE is null. */
+/*
+ * Opens a file for the given INODE, of which it takes ownership,
+ *  and returns the new file.  Returns a null pointer if an
+ *  allocation fails or if INODE is null. 
+ * 
+ * 这是不做权限检查的意思？
+ * */
 struct file* file_open(struct inode* inode) {
   struct file* file = calloc(1, sizeof *file);
   if (inode != NULL && file != NULL) {

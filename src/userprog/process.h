@@ -20,8 +20,9 @@ typedef void (*stub_fun)(pthread_fun, void*);
 /* The process control block for a given process. Since
    there can be multiple threads per process, we need a separate
    PCB from the TCB. All TCBs in a process will have a pointer
-   to the PCB, and the PCB will have a pointer to the main thread
-   of the process, which is `special`. */
+   to the PCB, and the PCB will have a pointer to the main thread 
+   of the process, which is `special`. 
+   PCB 需要包含一个指向主线程的指针*/
 struct process {
   /* Owned by process.c. */
   uint32_t* pagedir;          /* Page directory. */

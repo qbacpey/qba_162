@@ -119,6 +119,23 @@ static void start_process(void* file_name_) {
     thread_exit();
   }
 
+  /*
+   * 说到底这里的作用应该是向用户栈里边压入初始参数
+   * 也就是Argc Argv那些玩意
+   * 但是现在不知道这两个参数被放在了什么地方
+   * 于是只能随便调节一下栈指针，应付一下对齐检查
+   * 
+   * x86的要求是在将所有argument压入栈中之后
+   * 栈对齐16位，也就是esp的末位应该是0
+   * 调用call之后压入返回地址，esp的末位就应当变为c
+   * 压入ebp之后，esp的末位就应当变为8（这也是%ebp实际所指向的地址）
+   * 这也是为什么在callee中获取argument需要0x8(ebp)的原因
+   * 
+   * 具体到这里，由于桩函数有两个参数，因此执行intr_exit之前
+   * 地址应当变为 0x10 + 0x4 (没有调用call，自然不会将返回地址压栈)
+   * */
+  if_.esp -= 0x14;
+
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -353,6 +370,8 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
 
   /* Start address. */
   *eip = (void (*)(void))ehdr.e_entry;
+
+  // 这里是不是应该调用 setup_thread ?
 
   success = true;
 

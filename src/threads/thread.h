@@ -69,12 +69,18 @@ typedef int tid_t;
          structures or arrays as non-static local variables.  Use
          dynamic allocation with malloc() or palloc_get_page()
          instead.
+         总而言之就是，不要在内核栈中分配过大的数据结构，
+         要么使用 malloc，要么使用 palloc_get_page
 
    The first symptom of either of these problems will probably be
    an assertion failure in thread_current(), which checks that
    the `magic' member of the running thread's `struct thread' is
    set to THREAD_MAGIC.  Stack overflow will normally change this
-   value, triggering the assertion. */
+   value, triggering the assertion. 
+   上面提到的 magic 其实就是一个哨兵值，thread_current 会检查这个哨兵值
+   如果它被修改了（也就是不等于 THREAD_MAGIC）那么就会触发断言
+   */
+
 /* The `elem' member has a dual purpose.  It can be an element in
    the run queue (thread.c), or it can be an element in a
    semaphore wait list (synch.c).  It can be used these two ways
@@ -93,6 +99,7 @@ struct thread {
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
 
+// 这里好像可以定义 PCB
 #ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */
@@ -100,6 +107,7 @@ struct thread {
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
+  // 看起来 C 中结构体的定义方式是，最先定义的变量位于最低地址，所以哨兵值才放在最下面
 };
 
 /* Types of scheduler that the user can request the kernel
@@ -113,7 +121,7 @@ enum sched_policy {
 #define SCHED_DEFAULT SCHED_FIFO
 
 /* Determines which scheduling policy the kernel should use.
- * Controller by the kernel command-line options
+ * Controller by the kernel command-line options 内核命令行选择调度策略
  *  "-sched-default", "-sched-fair", "-sched-mlfqs", "-sched-fifo"
  * Is equal to SCHED_FIFO by default. */
 extern enum sched_policy active_sched_policy;
