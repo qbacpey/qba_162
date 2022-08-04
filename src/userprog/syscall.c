@@ -9,6 +9,8 @@ static void syscall_handler(struct intr_frame*);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
 int syscall_write(uint32_t* args);
+int syscall_practice(uint32_t* args);
+static inline bool check_beneath(void*);
 
 /* 
  * userprog/syscall.c（也就是本文件）的作用实际上就一个：分发系统调用
@@ -33,20 +35,51 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
    * include it in your final submission.
    */
 
-  /* printf("System call number: %d\n", args[0]); */
+  // printf("System call number: %d\n", args[0]);
 
-  if (args[0] == SYS_EXIT) {
+  switch (args[0])
+  {
+  case SYS_EXIT:
     f->eax = args[1];
     printf("%s: exit(%d)\n", thread_current()->pcb->process_name, args[1]);
     process_exit();
+    break;
+
+  case SYS_WRITE:
+    f->eax = syscall_write(args);
+    break;
+
+  case SYS_PRACTICE:
+    f->eax = syscall_practice(args);
+    break;
+  
+  default:
+    printf("Unknown system call number: %d\n", args[0]);
+    process_exit();
+    break;
   }
-  // // write 系统调用
-  // if (args[0] == SYS_WRITE) {
-  //   f->eax = syscall_write(args);
-  // }
 }
 
-// int syscall_write(uint32_t* args) {
-//   printf("%s: write(%d)\n", thread_current()->pcb->process_name, args[1]);
-//   return write(args[1], args[2], args[3]);
-// }
+int syscall_practice(uint32_t* args) {
+  return (int)args[1] + 1;
+}
+
+int syscall_write(uint32_t* args) {
+
+  bool is_beneath = check_beneath((void *)(args[2] + args[3]));
+  if(!is_beneath){
+    return -1;
+  }
+
+  if(args[1] == 1){
+    putbuf((char*)args[2], (size_t)args[3]);
+    return 0;
+  }
+
+  printf("%s: write(%d)\n", thread_current()->pcb->process_name, args[1]);
+  return 0;
+}
+
+static inline bool check_beneath(void* addr){
+  return addr > (void *)0xbffffffc ? false : true;
+}

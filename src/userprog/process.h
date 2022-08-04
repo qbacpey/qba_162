@@ -26,8 +26,8 @@ typedef void (*stub_fun)(pthread_fun, void*);
  */
 struct file_desc {
   uint32_t file_desc; /* 文件描述符，从3开始 */
-  file* file;         /* 文件指针，务必注意释放问题 */
-  list_elem elem;
+  struct file* file;         /* 文件指针，务必注意释放问题 */
+  struct list_elem elem;
 };
 
 /* 子进程表元素 
@@ -48,7 +48,7 @@ struct child_process {
   pid_t pid;             /* 子进程ID，执行exec的时候设置 */
   uint32_t status;       /* 退出状态，子进程执行exit的时候设置 */
   struct process* child; /* 子进程PCB地址，子进程exit时候需要将此设置为NULL */
-  list_elem elem;
+  struct list_elem elem;
 };
 
 /* 线程指针元素  struct list threads

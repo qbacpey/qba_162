@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "lib/string.h"
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
@@ -60,22 +61,17 @@ pid_t process_execute(const char* file_name) {
   char* fn_copy;
   tid_t tid;
 
-// 文件全局信号量？
+  // 文件全局信号量？
   sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
   if (fn_copy == NULL)
     return TID_ERROR;
-    /*
-     * 
-     * 这里得稍微修改一下
-     * 
-     * 毕竟文件参数的传递方式是直接在file_name里搞
-     * 需要把參數和文件名分出來
-     *  
-     */
+  /* file_name的第一个空格设置为\0 */
   strlcpy(fn_copy, file_name, PGSIZE);
+  // char *token, *save_ptr;
+  // strtok_r(file_name, " ", &save_ptr);
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
@@ -109,7 +105,13 @@ static void start_process(void* file_name_) {
     t->pcb = new_pcb;
 
     // 初始化文件描述符表
-    list_init ( &t->pcb->file_desc_table );
+    list_init(&(t->pcb->files_tab));
+
+    // 初始化子进程表
+    // list_init ( &(t->pcb->children) );
+
+    // 初始化线程表
+    // list_init ( &(t->pcb->threads) );
 
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
@@ -145,13 +147,6 @@ static void start_process(void* file_name_) {
     free(pcb_to_free);
   }
 
-  /* Clean up. Exit on failure or jump to userspace */
-  palloc_free_page(file_name);
-  if (!success) {
-    sema_up(&temporary);
-    thread_exit();
-  }
-
   /*
    * 说到底这里的作用应该是向用户栈里边压入初始参数
    * 也就是Argc Argv那些玩意
@@ -168,8 +163,75 @@ static void start_process(void* file_name_) {
    * 地址应当变为 0x10 + 0x4 (没有调用call，自然不会将返回地址压栈)
    * 
    * 最后，由于这里实现的是fake intr_frame 因此末尾对其的是 c 而不是 0
+   * 
+   * if_.esp -= 0x14;
    * */
-  if_.esp -= 0x14;
+
+  /* 拷贝字符串 */
+  int raw_char_count = strlen(file_name) + 1;
+  if_.esp -= (raw_char_count);
+  strlcpy(if_.esp, file_name, raw_char_count);
+  char *token = if_.esp;
+  /* 对齐4byte */
+  if_.esp = (void*)((uint32_t)if_.esp & 0xfffffff8);
+
+  /* 已经算上了其他固定数量的参数 */
+  int byte_counter = 0;
+
+  /* argc 一会再设置 */
+  byte_counter += 4;
+  if_.esp -= 4;
+  *(uint32_t*)if_.esp = 0;
+  
+  /* argv 一会再设置 */
+  byte_counter += 4;
+  if_.esp -= 4;
+  *(uint32_t*)if_.esp = 0;
+  
+  /* 使用strtok对fn_copy进行处理 */
+  
+  char *save_ptr;
+  for (token = strtok_r(token, " ", &save_ptr); token != NULL;
+       token = strtok_r(NULL, " ", &save_ptr)) {
+    byte_counter += 4;
+    if_.esp -= 4;
+    *(uint32_t*)if_.esp = token;
+  }
+  /* 确保最后一位是NULL */
+  byte_counter += 4;
+  if_.esp -= 4;
+  *(uint32_t*)if_.esp = 0;
+
+  /* 对齐 */
+  if (byte_counter % 16 != 0) {
+    byte_counter += 0x10;
+    byte_counter &= 0xfffffff0;
+  }
+  if_.esp = (void*)((uint32_t)if_.esp & 0xfffffff0);
+
+  /* 反转 有空再优化 注意单位 */
+  uint32_t last_pos = byte_counter - 4;
+  uint32_t place;
+  for (int i = 0; i < byte_counter / 2; i += 4) {
+    memmove(&place, if_.esp + last_pos - i, 4);
+    memmove(if_.esp + last_pos - i, if_.esp + i, 4);
+    memmove(if_.esp + i, &place, 4);
+  }
+
+  /* 设置 argv,argc */
+  *((uint32_t*)if_.esp + 1) = (uint32_t*)if_.esp + 2;
+  *(uint32_t*)if_.esp = byte_counter / 4 - 2;
+
+  /* 伪装返回值 */
+  if_.esp -= 0x4;
+
+  
+  /* Clean up. Exit on failure or jump to userspace */
+  palloc_free_page(file_name);
+  if (!success) {
+    sema_up(&temporary);
+    thread_exit();
+  }
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -243,6 +305,8 @@ void process_exit(void) {
     pagedir_activate(NULL);
     pagedir_destroy(pd);
   }
+
+  // 释放文件描述符表
 
   /* Free the PCB of this process and kill this thread
      Avoid race where PCB is freed before t->pcb is set to NULL
@@ -638,3 +702,19 @@ void pthread_exit(void) {}
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
 void pthread_exit_main(void) {}
+
+/* Reads a byte at user virtual address UADDR. UADDR must be below PHYS_BASE.
+Returns the byte value if successful, -1 if a segfault occurred. */
+static int get_user (const uint8_t *uaddr) {
+int result;
+asm ("movl $1f, %0; movzbl %1, %0; 1:" : "=&a" (result) : "m" (*uaddr));
+return result;
+}
+
+/* Writes BYTE to user address UDST. UDST must be below PHYS_BASE. Returns
+true if successful, false if a segfault occurred. */
+static bool put_user (uint8_t *udst, uint8_t byte) {
+int error_code;
+asm ("movl $1f, %0; movb %b2, %1; 1:" : "=&a" (error_code), "=m" (*udst) : "q" (byte));
+return error_code != -1;
+}
