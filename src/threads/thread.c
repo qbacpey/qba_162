@@ -500,7 +500,12 @@ static struct thread* next_thread_to_run(void) {
    added at the end of the function.
 
    After this function and its caller returns, the thread switch
-   is complete. */
+   is complete. 
+   * 
+   * 进程退出的时候应该仿照这里的写法释放所有派生的线程
+   * 
+   * 
+   */
 void thread_switch_tail(struct thread* prev) {
   struct thread* cur = running_thread();
 

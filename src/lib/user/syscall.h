@@ -40,6 +40,7 @@ unsigned tell(int fd);
 void close(int fd);
 int practice(int i);
 double compute_e(int n);
+
 tid_t sys_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
 void sys_pthread_exit(void) NO_RETURN;
 tid_t sys_pthread_join(tid_t tid);

@@ -29,7 +29,10 @@ bool setup_thread(void (**eip)(void), void** esp);
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
-   initialized here if main needs those members */
+   initialized here if main needs those members 
+   
+   简而言之，在这里执行主线程（进程）的初始化操作
+   */
 void userprog_init(void) {
   struct thread* t = thread_current();
   bool success;
@@ -49,17 +52,29 @@ void userprog_init(void) {
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
-   process id, or TID_ERROR if the thread cannot be created. */
+   process id, or TID_ERROR if the thread cannot be created. 
+   
+   似乎要在这里支持命令行参数
+   */
 pid_t process_execute(const char* file_name) {
   char* fn_copy;
   tid_t tid;
 
+// 文件全局信号量？
   sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
   if (fn_copy == NULL)
     return TID_ERROR;
+    /*
+     * 
+     * 这里得稍微修改一下
+     * 
+     * 毕竟文件参数的传递方式是直接在file_name里搞
+     * 需要把參數和文件名分出來
+     *  
+     */
   strlcpy(fn_copy, file_name, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
@@ -72,6 +87,11 @@ pid_t process_execute(const char* file_name) {
 /* A thread function that loads a user process and starts it
    running. */
 static void start_process(void* file_name_) {
+  /* 
+   * 就参数传递而言
+   * 更准确的讲，应该修改的地方是这里
+   * filename需要修改一下 
+   * */
   char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
@@ -88,6 +108,9 @@ static void start_process(void* file_name_) {
     new_pcb->pagedir = NULL;
     t->pcb = new_pcb;
 
+    // 初始化文件描述符表
+    list_init ( &t->pcb->file_desc_table );
+
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
@@ -101,6 +124,16 @@ static void start_process(void* file_name_) {
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(file_name, &if_.eip, &if_.esp);
   }
+
+  /* 
+   * 
+   * 应该是在这个地方初始化线程启动参数
+   * 
+   * 说实话，参数传递这里非常好实现：
+   * 
+   * 1.解析并复制file_name
+   * 
+   */
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
   if (!success && pcb_success) {
@@ -133,6 +166,8 @@ static void start_process(void* file_name_) {
    * 
    * 具体到这里，由于桩函数有两个参数，因此执行intr_exit之前
    * 地址应当变为 0x10 + 0x4 (没有调用call，自然不会将返回地址压栈)
+   * 
+   * 最后，由于这里实现的是fake intr_frame 因此末尾对其的是 c 而不是 0
    * */
   if_.esp -= 0x14;
 
@@ -160,12 +195,34 @@ int process_wait(pid_t child_pid UNUSED) {
   return 0;
 }
 
-/* Free the current process's resources. */
+/* Free the current process's resources. 
+ * 
+ * 现列出需要额外释放的资源：
+ * 1.进程文件描述符表
+ * 
+ * 2.子进程表
+ * 
+ * 3.线程派生出的子线程结构体好像也算在里边
+ * 
+ * 4.锁（待定）
+ * 
+ * 5.线程指针列表：除了需要释放struct thread本身之外（仿照switch_tail）
+ *                还需要处理一下allelem（thread_exit）
+ *                elem的问题还不好说，先不管他，毕竟thread_exit也没有退出操作
+ *                
+ * 
+ * 还有其他需要做的工作：
+ * 1.将退出状态返回给父进程
+ * 
+ * 
+ */
 void process_exit(void) {
   struct thread* cur = thread_current();
   uint32_t* pd;
 
-  /* If this thread does not have a PCB, don't worry */
+  /* If this thread does not have a PCB, don't worry
+   * 直接退出
+   */
   if (cur->pcb == NULL) {
     thread_exit();
     NOT_REACHED();

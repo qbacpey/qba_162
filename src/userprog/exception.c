@@ -85,7 +85,10 @@ static void kill(struct intr_frame* f) {
       /* Kernel's code segment, which indicates a kernel bug.
          Kernel code shouldn't throw exceptions.  (Page faults
          may cause kernel exceptions--but they shouldn't arrive
-         here.)  Panic the kernel to make the point.  */
+         here.)  Panic the kernel to make the point.  
+
+         看起来就算是采用第二种方式处理地址问题，也不该来这
+         */
       intr_dump_frame(f);
       PANIC("Kernel bug - unexpected interrupt in kernel");
 
