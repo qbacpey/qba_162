@@ -40,13 +40,25 @@ struct file_desc {
  * 地址：
  * 父进程执行exec设置child指向子进程PCB地址
  * 子进程exit正常退出的时候将地址设置为NULL
- * 子进程异常退出的时候将值设置为NULL
+ * 子进程异常退出的时候将值设置为NULL、
+ * 
+ * 信号量：
+ * 初始值为0
+ * 考虑到一个父进程只能等待一次子进程
+ * 因此该父进程等待子进程时就需要将信号量down
+ * 随后每个子进程退出的时候都需要up信号量
+ * 此时如果父进程被唤醒，那么父进程就需要清除此元素
+ * 
+ * pid：
+ * 需要让子进程来进行设置
+ * 即根据主线程id进行设置
  * 
  */
 
 struct child_process {
-  pid_t pid;             /* 子进程ID，执行exec的时候设置 */
-  uint32_t status;       /* 退出状态，子进程执行exit的时候设置 */
+  pid_t pid;       /* 子进程ID，执行exec的时候由子线程设置 */
+  uint32_t status; /* 退出状态，子进程执行exit的时候设置 */
+  struct semaphore waiting; /* 初始值为0的信号量，任何进程退出的时候都需要将这个信号量up一下 */
   struct process* child; /* 子进程PCB地址，子进程exit时候需要将此设置为NULL */
   struct list_elem elem;
 };
@@ -57,7 +69,6 @@ struct child_process {
  * 线程退出的时候需要将自身从此表中移除
  * 
  */
-
 
 /* The process control block for a given process. Since
    there can be multiple threads per process, we need a separate
@@ -83,7 +94,7 @@ struct process {
   /* Owned by process.c. */
   uint32_t* pagedir;          /* Page directory. */
   struct process* parent;     /* 指向父进程 */
-  struct child_process* self; /* 指向父进程中子进程的位置 */
+  struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
   char process_name[16];      /* Name of the main thread */
   struct list files_tab; /* 元素是文件描述符表元素，也就是struct file_desc */
   struct list children;  /* 元素是子进程表元素，也就是struct child_process */
