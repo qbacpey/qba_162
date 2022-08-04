@@ -63,8 +63,10 @@ void exception_print_stats(void) { printf("Exception: %lld page faults\n", page_
 static void kill(struct intr_frame* f) {
   /* This interrupt is one (probably) caused by a user process.
      For example, the process might have tried to access unmapped
-     virtual memory (a page fault).  For now, we simply kill the
-     user process.  Later, we'll want to handle page faults in
+     virtual memory (a page fault).  
+     
+     For now, we simply kill the user process.  
+     Later, we'll want to handle page faults in
      the kernel.  Real Unix-like operating systems pass most
      exceptions back to the process via signals, but we don't
      implement them. */
@@ -78,6 +80,7 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
+      printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
       process_exit();
       NOT_REACHED();
 

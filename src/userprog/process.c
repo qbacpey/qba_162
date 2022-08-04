@@ -70,11 +70,11 @@ pid_t process_execute(const char* file_name) {
     return TID_ERROR;
   /* file_name的第一个空格设置为\0 */
   strlcpy(fn_copy, file_name, PGSIZE);
-  // char *token, *save_ptr;
-  // strtok_r(file_name, " ", &save_ptr);
+  char *token, *save_ptr;
+  fn_copy = strtok_r(fn_copy, " ", &save_ptr);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create(fn_copy, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
   return tid;
@@ -83,11 +83,6 @@ pid_t process_execute(const char* file_name) {
 /* A thread function that loads a user process and starts it
    running. */
 static void start_process(void* file_name_) {
-  /* 
-   * 就参数传递而言
-   * 更准确的讲，应该修改的地方是这里
-   * filename需要修改一下 
-   * */
   char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
@@ -126,6 +121,16 @@ static void start_process(void* file_name_) {
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(file_name, &if_.eip, &if_.esp);
   }
+  /* 
+   * 就参数传递而言
+   * 更准确的讲，应该修改的地方是这里
+   * filename需要修改一下 
+   * */
+  int null_pos = 0;
+  while ('\0' != file_name[null_pos]) {
+    null_pos++;
+  }
+  file_name[null_pos] = ' ';
 
   /* 
    * 
@@ -173,7 +178,7 @@ static void start_process(void* file_name_) {
   strlcpy(if_.esp, file_name, raw_char_count);
   char *token = if_.esp;
   /* 对齐4byte */
-  if_.esp = (void*)((uint32_t)if_.esp & 0xfffffff8);
+  if_.esp = (void*)((uint32_t)if_.esp & 0xfffffff0);
 
   /* 已经算上了其他固定数量的参数 */
   int byte_counter = 0;
@@ -191,11 +196,13 @@ static void start_process(void* file_name_) {
   /* 使用strtok对fn_copy进行处理 */
   
   char *save_ptr;
+  int argc = 0;
   for (token = strtok_r(token, " ", &save_ptr); token != NULL;
        token = strtok_r(NULL, " ", &save_ptr)) {
     byte_counter += 4;
     if_.esp -= 4;
     *(uint32_t*)if_.esp = token;
+    argc++;
   }
   /* 确保最后一位是NULL */
   byte_counter += 4;
@@ -203,7 +210,7 @@ static void start_process(void* file_name_) {
   *(uint32_t*)if_.esp = 0;
 
   /* 对齐 */
-  if (byte_counter % 16 != 0) {
+  if (byte_counter % 0x10 != 0) {
     byte_counter += 0x10;
     byte_counter &= 0xfffffff0;
   }
@@ -218,9 +225,10 @@ static void start_process(void* file_name_) {
     memmove(if_.esp + i, &place, 4);
   }
 
-  /* 设置 argv,argc */
+  /* 设置 argv */
   *((uint32_t*)if_.esp + 1) = (uint32_t*)if_.esp + 2;
-  *(uint32_t*)if_.esp = byte_counter / 4 - 2;
+  /* 设置 argc */
+  *(uint32_t*)if_.esp = argc;
 
   /* 伪装返回值 */
   if_.esp -= 0x4;
@@ -271,6 +279,8 @@ int process_wait(pid_t child_pid UNUSED) {
  * 5.线程指针列表：除了需要释放struct thread本身之外（仿照switch_tail）
  *                还需要处理一下allelem（thread_exit）
  *                elem的问题还不好说，先不管他，毕竟thread_exit也没有退出操作
+ * 
+ * 6.进程名称
  *                
  * 
  * 还有其他需要做的工作：
