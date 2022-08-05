@@ -114,10 +114,8 @@ struct list {
 * @member:     the name of the list_struct within the struct. 
  */
 #define list_for_each_entry(pos, list, member)                                                     \
-  \ 
-        for (pos = list_entry(list_begin(list), typeof(*pos), member);\ 
-             &(pos->member) != list_end(list);\ 
-             pos = list_entry(pos->member.next, typeof(*pos), member))
+  for (pos = list_entry(list_begin(list), typeof(*pos), member); &(pos->member) != list_end(list); \
+       pos = list_entry(pos->member.next, typeof(*pos), member))
 
 /** 
 * list_clean_each  -       iterate over list of given type 
@@ -128,12 +126,8 @@ struct list {
 * @member:     the name of the list_struct within the struct. 
  */
 #define list_clean_each(pos, list, member)                                                         \
-  \ 
-        for (pos = !list_empty(list) \ 
-                  ? list_entry(list_pop_front(list), typeof(*pos), member) \
-                  : NULL;\ 
-             !list_empty(list);\ 
-             pos = list_pop_front(list))
+  for (pos = !list_empty(list) ? list_entry(list_pop_front(list), typeof(*pos), member) : NULL;    \
+       !list_empty(list); pos = list_pop_front(list))
 
 /* List initialization.
 
