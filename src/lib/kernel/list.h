@@ -109,13 +109,14 @@ struct list {
 /** 
 * list_for_each_entry  -       iterate over list of given type 
 * 注意，word_count里边的elem是一个结构体，而不是一个指向list_elem的指针
+* TODO 这里有个问题，pos是会将尾哨兵当成链表元素的
 * @pos:        the type * to use as a loop counter. 
 * @list:       the pointer of list. 
 * @member:     the name of the list_struct within the struct. 
  */
 #define list_for_each_entry(pos, list, member)                                                     \
-  for (pos = list_entry(list_begin(list), typeof(*pos), member); &(pos->member) != list_end(list); \
-       pos = list_entry(pos->member.next, typeof(*pos), member))
+  for (pos = !list_empty(list) ? list_entry(list_begin(list), typeof(*pos), member) : NULL;    \
+       &(pos->member) != list_end(list); pos = list_entry(pos->member.next, typeof(*pos), member))
 
 /** 
 * list_clean_each  -       iterate over list of given type 

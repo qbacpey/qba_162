@@ -58,7 +58,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
    */
 
   // printf("System call number: %d\n", args[0]);
-  bool beneath = false;
+  bool beneath = true;
   f->eax = -1;
 
   switch (args[0]) {
@@ -193,10 +193,13 @@ int syscall_open(uint32_t* args, struct process* pcb) {
 
 int syscall_close(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
+  int result = -1;
+  if (fd < 3) {
+    return result;
+  }
   struct list* files_tab = &(pcb->files_tab);
   struct lock* files_tab_lock = &(pcb->files_lock);
   struct file_desc* pos = NULL;
-
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
@@ -205,13 +208,17 @@ int syscall_close(uint32_t* args, struct process* pcb) {
       file_close(pos->file);
       sema_up(filesys_sema);
       pcb->filesys_sema = NULL;
+      result = 0;
       break;
     }
   }
-  list_remove(&(pos->elem));
-  free(pos);
+  // 没找到就不必移除了
+  if (pos != NULL) {
+    list_remove(&(pos->elem));
+    free(pos);
+  }
   lock_release(files_tab_lock);
-  return 0;
+  return result;
 }
 
 int syscall_filesize(uint32_t* args, struct process* pcb) {
