@@ -101,6 +101,7 @@ static void start_process(void* file_name_) {
 
     // 初始化文件描述符表
     list_init(&(t->pcb->files_tab));
+    lock_init(&t->pcb->files_lock);
     t->pcb->files_next_desc = 3;
     t->pcb->filesys_sema = NULL;
 
@@ -330,8 +331,14 @@ void process_exit(int exit_code) {
   }
 
   // 释放文件描述符表
+  // NULL 是必须设置的
   struct file_desc* file_pos = NULL;
   list_clean_each(file_pos, &(pcb_to_free->files_tab), elem){
+    file_close(file_pos->file);
+    free(file_pos);
+  }
+  // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
+  if (file_pos != NULL) {
     file_close(file_pos->file);
     free(file_pos);
   }

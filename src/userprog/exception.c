@@ -92,6 +92,11 @@ static void kill(struct intr_frame* f) {
 
          看起来就算是采用第二种方式处理地址问题，也不该来这
          */
+      if(f->vec_no == 14){
+         // kernel page fault
+         printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
+         process_exit(-1);
+      } 
       intr_dump_frame(f);
       PANIC("Kernel bug - unexpected interrupt in kernel");
 
@@ -144,8 +149,8 @@ static void page_fault(struct intr_frame* f) {
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */
-  printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
-         not_present ? "not present" : "rights violation", write ? "writing" : "reading",
-         user ? "user" : "kernel");
+//   printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
+//          not_present ? "not present" : "rights violation", write ? "writing" : "reading",
+//          user ? "user" : "kernel");
   kill(f);
 }

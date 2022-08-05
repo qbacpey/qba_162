@@ -121,13 +121,16 @@ struct list {
 * list_clean_each  -       iterate over list of given type 
 * 注意，word_count里边的elem是一个结构体，而不是一个指向list_elem的指针
 * 不同之处在于这个是用于清除列表元素的（没有回头路）
+* 两点要求：
+* 1. pos 初始必须设置为 NULL
+* 2. for循环后必须添加if 
 * @pos:        the type * to use as a loop counter. 
 * @list:       the pointer of list. 
 * @member:     the name of the list_struct within the struct. 
  */
 #define list_clean_each(pos, list, member)                                                         \
   for (pos = !list_empty(list) ? list_entry(list_pop_front(list), typeof(*pos), member) : NULL;    \
-       !list_empty(list); pos = list_pop_front(list))
+       !list_empty(list); pos = list_entry(list_pop_front(list), typeof(*pos), member))
 
 /* List initialization.
 

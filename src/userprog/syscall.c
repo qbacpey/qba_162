@@ -87,7 +87,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       break;
 
     case SYS_OPEN:
-      beneath = check_buffer((void*)args[1], strlen((char*)args[1]));
+      beneath = (void*)args[1] != NULL && check_buffer((void*)args[1], strlen((char*)args[1]));
       if (beneath) {
         f->eax = syscall_open(args, pcb);
       }
@@ -165,6 +165,8 @@ int syscall_open(uint32_t* args, struct process* pcb) {
   struct list* files_tab = &(pcb->files_tab);
   struct lock* files_tab_lock = &(pcb->files_lock);
   struct file* new_file = NULL;
+
+  // printf("%s: open file%s\n", pcb->process_name, (char*)args[1]);
 
   sema_down(filesys_sema);
   pcb->filesys_sema = filesys_sema;
