@@ -78,6 +78,8 @@ struct child_process {
    PCB 需要包含一个指向主线程的指针
    还需要包含一个子进程表
 * 
+* 进程调用文件系统之前设置锁，完成之后释放锁
+* 
 * 资源释放问题就不必再说了，记得在进程退出的时候全部释放掉
 *    
 * 一个比较重要的问题是父子进程间的通信问题
@@ -98,7 +100,8 @@ struct process {
   char process_name[16];      /* Name of the main thread */
   struct list files_tab; /* 元素是文件描述符表元素，也就是struct file_desc */
   struct lock files_lock; /* 文件描述符表的锁 */
-  uint32_t files_next_desc; /* 文件描述符表的锁 */
+  struct semaphore* filesys_sema; /* 全局文件系统信号量指针 */
+  uint32_t files_next_desc; /* 下一文件描述符 */
   struct list children;  /* 元素是子进程表元素，也就是struct child_process */
   struct list threads; /* 元素是TCB */
 

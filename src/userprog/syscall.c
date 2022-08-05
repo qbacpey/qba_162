@@ -5,23 +5,25 @@
 #include "threads/thread.h"
 #include "threads/malloc.h"
 #include "userprog/process.h"
+#include "filesys/file.h"
 
 static void syscall_handler(struct intr_frame*);
-static struct lock temporary; /* 临时文件系统锁 */
-static struct lock* filesys_lock = NULL; /* 临时文件系统锁 */
+static struct semaphore temporary;     /* 临时文件系统锁 */
+struct semaphore* filesys_sema = NULL; /* 全局临时文件系统锁 */
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
-int syscall_practice(uint32_t* args);
-bool syscall_create(uint32_t* args);
-bool syscall_remove(uint32_t* args);
-int syscall_open(uint32_t* args);
-int syscall_write(uint32_t* args);
-int syscall_filesize(uint32_t* args);
-int syscall_read(uint32_t* args);
-void syscall_seek(uint32_t* args);
-void syscall_close(uint32_t* args);
-unsigned syscall_tell(uint32_t* args);
-static inline bool check_fd(uint32_t); /* 二参数系统调用检查 */
+int syscall_practice(uint32_t* args, struct process* pcb);
+bool syscall_create(uint32_t* args, struct process* pcb);
+bool syscall_remove(uint32_t* args, struct process* pcb);
+int syscall_open(uint32_t* args, struct process* pcb);
+int syscall_write(uint32_t* args, struct process* pcb);
+int syscall_filesize(uint32_t* args, struct process* pcb);
+int syscall_read(uint32_t* args, struct process* pcb);
+void syscall_seek(uint32_t* args, struct process* pcb);
+void syscall_close(uint32_t* args, struct process* pcb);
+unsigned syscall_tell(uint32_t* args, struct process* pcb);
+static inline bool check_fd(uint32_t,
+                            struct process*); /* fd系统调用检查，仅检查是否大于下一个文件标识符 */
 static inline bool check_buffer(uint32_t*, uint32_t); /* 三参数系统调用检查 */
 
 /* 
@@ -39,10 +41,11 @@ static inline bool check_buffer(uint32_t*, uint32_t); /* 三参数系统调用�
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
+  struct process* pcb = thread_current()->pcb;
 
-  if(filesys_lock == NULL){
-    lock_init(&temporary);
-    filesys_lock = &temporary;
+  if (filesys_sema == NULL) {
+    sema_init(&temporary, 1);
+    filesys_sema = &temporary;
   }
 
   /*
@@ -58,60 +61,60 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   switch (args[0]) {
     case SYS_EXIT:
       f->eax = args[1];
-      printf("%s: exit(%d)\n", thread_current()->pcb->process_name, args[1]);
+      printf("%s: exit(%d)\n", pcb->process_name, args[1]);
       process_exit(f->eax);
       break;
 
     case SYS_PRACTICE:
-      f->eax = syscall_practice(args);
+      f->eax = syscall_practice(args, pcb);
       break;
 
     case SYS_CREATE:
       beneath = check_buffer(args[1], strlen(args[1]));
-      if(beneath){
-        f->eax = syscall_create(args);
+      if (beneath) {
+        f->eax = syscall_create(args, pcb);
       }
       break;
 
     case SYS_REMOVE:
       beneath = check_buffer(args[1], strlen(args[1]));
       if (beneath) {
-        f->eax = syscall_remove(args);
+        f->eax = syscall_remove(args, pcb);
       }
       break;
 
     case SYS_OPEN:
       beneath = check_buffer(args[1], strlen(args[1]));
       if (beneath) {
-        f->eax = syscall_open(args);
+        f->eax = syscall_open(args, pcb);
       }
       break;
 
     case SYS_FILESIZE:
-      f->eax = syscall_write(args);
+      f->eax = check_fd(args[1], pcb) ? syscall_filesize(args, pcb) : -1;
       break;
 
     case SYS_READ:
-      f->eax = syscall_write(args);
+      f->eax = syscall_write(args, pcb);
       break;
 
     case SYS_WRITE:
       beneath = check_buffer(args[2], args[3]);
-      if(beneath){
-        f->eax = syscall_write(args);
+      if (beneath) {
+        f->eax = syscall_write(args, pcb);
       }
       break;
 
     case SYS_SEEK:
-      f->eax = syscall_write(args);
+      f->eax = syscall_write(args, pcb);
       break;
 
     case SYS_TELL:
-      f->eax = syscall_write(args);
+      f->eax = syscall_write(args, pcb);
       break;
 
     case SYS_CLOSE:
-      f->eax = syscall_write(args);
+      f->eax = syscall_write(args, pcb);
       break;
 
     default:
@@ -126,33 +129,42 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
 }
 
-int syscall_practice(uint32_t* args) { return (int)args[1] + 1; }
+int syscall_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
 
-bool syscall_create(uint32_t* args) {
+bool syscall_create(uint32_t* args, struct process* pcb) {
   bool result = false;
-  lock_acquire(filesys_lock);
+  
+  sema_down(filesys_sema);
+  pcb->filesys_sema = filesys_sema;
   result = filesys_create(args[1], args[2]);
-  lock_release(filesys_lock);
+  sema_up(filesys_sema);
+  pcb->filesys_sema = NULL;
+
   return result;
 }
 
-bool syscall_remove(uint32_t* args) {
+bool syscall_remove(uint32_t* args, struct process* pcb) {
   bool result = false;
-  lock_acquire(filesys_lock);
+
+  sema_down(filesys_sema);
+  pcb->filesys_sema = filesys_sema;
   result = filesys_remove(args[1]);
-  lock_release(filesys_lock);
+  sema_up(filesys_sema);
+  pcb->filesys_sema = NULL;
+
   return result;
 }
 
-int syscall_open(uint32_t* args) {
-  struct process* pcb = thread_current()->pcb;
+int syscall_open(uint32_t* args, struct process* pcb) {
   struct list* files_tab = &(pcb->files_tab);
   struct lock* files_tab_lock = &(pcb->files_lock);
   struct file* new_file = NULL;
 
-  lock_acquire(filesys_lock);
+  sema_down(filesys_sema);
+  pcb->filesys_sema = filesys_sema;
   new_file = filesys_open(args[1]);
-  lock_release(filesys_lock);
+  sema_up(filesys_sema);
+  pcb->filesys_sema = NULL;
 
   if (new_file == NULL) {
     ASSERT(pcb->files_next_desc >= 3);
@@ -171,30 +183,45 @@ int syscall_open(uint32_t* args) {
   }
 }
 
-int syscall_filesize(uint32_t* args){
+int syscall_filesize(uint32_t* args, struct process* pcb) {
+  uint32_t fd = args[1];
+  int size = -1;
+  struct list* files_tab = &(pcb->files_tab);
+  struct lock* files_tab_lock = &(pcb->files_lock);
+  struct file_desc* pos = NULL;
 
+  lock_acquire(files_tab_lock);
+  list_for_each_entry(pos, files_tab, elem) {
+    if (pos->file_desc == fd) {
+      size = (int)file_length(pos->file);
+      break;
+    }
+  }
+  lock_release(files_tab_lock);
+
+  return size;
 }
 
-int syscall_write(uint32_t* args) {
+int syscall_write(uint32_t* args, struct process* pcb) {
 
   if (args[1] == 1) {
     putbuf((char*)args[2], (size_t)args[3]);
     return 0;
   }
 
-  printf("%s: write(%d)\n", thread_current()->pcb->process_name, args[1]);
+  printf("%s: write(%d)\n", pcb->process_name, args[1]);
   return 0;
 }
 
-static inline bool check_fd(uint32_t fd) {
-  struct process* pcb = thread_current()->pcb;
-  if(pcb->files_next_desc >= fd){
-    return -1;
+static inline bool check_fd(uint32_t fd, struct process* pcb) {
+  struct list* files_tab = &(pcb->files_tab);
+  struct lock* files_tab_lock = &(pcb->files_lock);
+
+  if (pcb->files_next_desc >= fd) {
+    return false;
   }
-  list_for_each_entry(){
-    
-  }
-  return (void*)args[1] > (void*)0xbffffffc ? false : true;
+
+  return true;
 }
 static inline bool check_buffer(uint32_t* buffer, uint32_t size) {
   void* addr = (void*)(buffer + size);
