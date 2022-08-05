@@ -101,6 +101,7 @@ static void start_process(void* file_name_) {
 
     // 初始化文件描述符表
     list_init(&(t->pcb->files_tab));
+    t->pcb->files_next_desc = 3;
 
     // 初始化子进程表
     // list_init ( &(t->pcb->children) );
@@ -288,7 +289,7 @@ int process_wait(pid_t child_pid UNUSED) {
  * 
  * 
  */
-void process_exit(void) {
+void process_exit(int) {
   struct thread* cur = thread_current();
   uint32_t* pd;
 
@@ -316,13 +317,21 @@ void process_exit(void) {
     pagedir_destroy(pd);
   }
 
-  // 释放文件描述符表
+ 
 
   /* Free the PCB of this process and kill this thread
      Avoid race where PCB is freed before t->pcb is set to NULL
      If this happens, then an unfortuantely timed timer interrupt
      can try to activate the pagedir, but it is now freed memory */
   struct process* pcb_to_free = cur->pcb;
+
+  // 释放文件描述符表
+  struct file_desc* file_pos = NULL;
+  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem){
+    file_close(file_pos->file);
+    free(file_pos);
+  }
+
   cur->pcb = NULL;
   free(pcb_to_free);
 

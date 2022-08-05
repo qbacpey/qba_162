@@ -97,6 +97,8 @@ struct process {
   struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
   char process_name[16];      /* Name of the main thread */
   struct list files_tab; /* 元素是文件描述符表元素，也就是struct file_desc */
+  struct lock files_lock; /* 文件描述符表的锁 */
+  uint32_t files_next_desc; /* 文件描述符表的锁 */
   struct list children;  /* 元素是子进程表元素，也就是struct child_process */
   struct list threads; /* 元素是TCB */
 
@@ -107,7 +109,7 @@ void userprog_init(void);
 
 pid_t process_execute(const char* file_name);
 int process_wait(pid_t);
-void process_exit(void);
+void process_exit(int);
 void process_activate(void);
 
 bool is_main_thread(struct thread*, struct process*);
