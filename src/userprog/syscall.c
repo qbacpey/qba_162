@@ -59,6 +59,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
   // printf("System call number: %d\n", args[0]);
   bool beneath = false;
+  f->eax = -1;
 
   switch (args[0]) {
     case SYS_EXIT:
@@ -72,21 +73,21 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       break;
 
     case SYS_CREATE:
-      beneath = check_buffer((void *)args[1], strlen((char *)args[1]));
+      beneath = (void*)args[1] != NULL && check_buffer((void*)args[1], strlen((char*)args[1]));
       if (beneath) {
         f->eax = syscall_create(args, pcb);
       }
       break;
 
     case SYS_REMOVE:
-      beneath = check_buffer((void *)args[1], strlen((char *)args[1]));
+      beneath = (void*)args[1] != NULL && check_buffer((void*)args[1], strlen((char*)args[1]));
       if (beneath) {
         f->eax = syscall_remove(args, pcb);
       }
       break;
 
     case SYS_OPEN:
-      beneath = check_buffer((void *)args[1], strlen((char *)args[1]));
+      beneath = check_buffer((void*)args[1], strlen((char*)args[1]));
       if (beneath) {
         f->eax = syscall_open(args, pcb);
       }
@@ -97,14 +98,14 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       break;
 
     case SYS_READ:
-      beneath = check_buffer((void *)args[2], args[3]);
+      beneath = (void*)args[2] != NULL && check_buffer((void*)args[2], args[3]);
       if (beneath) {
         f->eax = check_fd(args[1], pcb) ? syscall_read(args, pcb) : -1;
       }
       break;
 
     case SYS_WRITE:
-      beneath = check_buffer((void *)args[2], args[3]);
+      beneath = (void*)args[2] != NULL && check_buffer((void*)args[2], args[3]);
       if (beneath) {
         f->eax = check_fd(args[1], pcb) ? syscall_write(args, pcb) : -1;
       }
@@ -129,7 +130,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
 
   if (!beneath) {
-    printf("System call %d failed for invalid address!\n", args[0]);
+    printf("%s: exit(%d)\n", pcb->process_name, f->eax);
     process_exit(f->eax);
   }
 }
@@ -141,7 +142,7 @@ bool syscall_create(uint32_t* args, struct process* pcb) {
 
   sema_down(filesys_sema);
   pcb->filesys_sema = filesys_sema;
-  result = filesys_create((char *)args[1], args[2]);
+  result = filesys_create((char*)args[1], args[2]);
   sema_up(filesys_sema);
   pcb->filesys_sema = NULL;
 
@@ -153,7 +154,7 @@ bool syscall_remove(uint32_t* args, struct process* pcb) {
 
   sema_down(filesys_sema);
   pcb->filesys_sema = filesys_sema;
-  result = filesys_remove((char *)args[1]);
+  result = filesys_remove((char*)args[1]);
   sema_up(filesys_sema);
   pcb->filesys_sema = NULL;
 
@@ -167,7 +168,7 @@ int syscall_open(uint32_t* args, struct process* pcb) {
 
   sema_down(filesys_sema);
   pcb->filesys_sema = filesys_sema;
-  new_file = filesys_open((char *)args[1]);
+  new_file = filesys_open((char*)args[1]);
   sema_up(filesys_sema);
   pcb->filesys_sema = NULL;
 
@@ -188,13 +189,8 @@ int syscall_open(uint32_t* args, struct process* pcb) {
   }
 }
 
-int syscall_close(uint32_t* args, struct process* pcb){
-  struct list* files_tab = &(pcb->files_tab);
-  struct lock* files_tab_lock = &(pcb->files_lock);
-  struct file* new_file = NULL;
-
+int syscall_close(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
-  uint32_t off = -1;
   struct list* files_tab = &(pcb->files_tab);
   struct lock* files_tab_lock = &(pcb->files_lock);
   struct file_desc* pos = NULL;
@@ -204,9 +200,7 @@ int syscall_close(uint32_t* args, struct process* pcb){
     if (pos->file_desc == fd) {
       sema_down(filesys_sema);
       pcb->filesys_sema = filesys_sema;
-
       file_close(pos->file);
-
       sema_up(filesys_sema);
       pcb->filesys_sema = NULL;
       break;
@@ -239,7 +233,7 @@ int syscall_filesize(uint32_t* args, struct process* pcb) {
 
 int syscall_read(uint32_t* args, struct process* pcb) {
   if (args[1] == 0) {
-    for (int i = 0; i < (uint32_t)args[3]; i++) {
+    for (uint32_t i = 0; i < (uint32_t)args[3]; i++) {
       *(uint8_t*)(args[2] + i) = input_getc();
     }
     return args[3];
@@ -258,7 +252,7 @@ int syscall_read(uint32_t* args, struct process* pcb) {
     if (pos->file_desc == fd) {
       sema_down(filesys_sema);
       pcb->filesys_sema = filesys_sema;
-      off = file_read(pos->file, (void *)args[2], args[3]);
+      off = file_read(pos->file, (void*)args[2], args[3]);
       sema_up(filesys_sema);
       pcb->filesys_sema = NULL;
       break;
@@ -297,17 +291,7 @@ int syscall_write(uint32_t* args, struct process* pcb) {
   return off;
 }
 
-static inline bool check_fd(uint32_t fd, struct process* pcb) {
-  struct list* files_tab = &(pcb->files_tab);
-  struct lock* files_tab_lock = &(pcb->files_lock);
-
-  if (pcb->files_next_desc >= fd) {
-    return false;
-  }
-
-  return true;
-}
+static inline bool check_fd(uint32_t fd, struct process* pcb) { return pcb->files_next_desc >= fd; }
 static inline bool check_buffer(void* buffer, uint32_t size) {
-  void* addr = (void*)(buffer + size);
-  return addr > (void*)0xbffffffc ? false : true;
+  return (void*)(buffer + size) < (void*)0xbffffffc;
 }
