@@ -120,7 +120,7 @@ static void start_process(void* file_name_) {
     t->pcb->filesys_sema = NULL;
 
     // 初始化子进程表
-    // list_init ( &(t->pcb->children) );
+    list_init ( &(t->pcb->children) );
 
     // 初始化线程表
     // list_init ( &(t->pcb->threads) );
@@ -327,18 +327,39 @@ void process_exit(int exit_code) {
      Avoid race where PCB is freed before t->pcb is set to NULL
      If this happens, then an unfortuantely timed timer interrupt
      can try to activate the pagedir, but it is now freed memory */
+  /* 需要确保子进程编辑自己的PCB之前先获取父进程的锁 */
   struct process* pcb_to_free = cur->pcb;
+  if(pcb_to_free->self != NULL){
+    sema_down
+
+  }
 
   if(pcb_to_free->filesys_sema != NULL){
     sema_up(pcb_to_free->filesys_sema); /* 文件系统执行操作时发生page fault */
   }
 
-  // 释放文件描述符表
-  // NULL 是必须设置的
+  /* 释放文件描述符表，NULL 是必须设置的 */
   struct file_desc* file_pos = NULL;
-  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem){
+  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem) {
     file_close(file_pos->file);
     free(file_pos);
+  }
+  // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
+  if (file_pos != NULL) {
+    file_close(file_pos->file);
+    free(file_pos);
+  }
+
+  /* 释放子进程表 */
+  struct child_process* child = NULL;
+  list_clean_each(child, &(pcb_to_free->children), elem) {
+    // 子进程未退出，需要额外工作
+    if(!sema_try_down(&(child->waiting))){
+      sema_down(&(child->child->edit));
+
+      sema_up();
+    }
+    free(child);
   }
   // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
   if (file_pos != NULL) {

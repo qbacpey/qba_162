@@ -32,6 +32,34 @@ struct file_desc {
 
 /* 子进程表元素 
  * 
+ * 确保获锁顺序为：editing->waiting
+ * 
+ * 子进程退出操作的前置要求：
+ * 首先需要down editing信号量
+ * 随后需要检查自身 PCB 的 self 是否为NULL
+ * 如果是，那么就代表父进程已经释放自身，无需返回（但是需要释放editing）
+ * 如果不是，那么：
+ *    1.设置返回值、将 child 设置为 NULL;
+ *    2.up waiting 信号量;
+ *    3.释放自身;
+ *    4.up editing;
+ * 
+ * 父进程wait操作的前置要求：
+ * 检查子进程表元素的 child 是否为NULL
+ * 如果是，那么就代表子进程已经释放自身，直接获取返回值或释放进程表元素（注意释放editing）
+ * 如果不是，那么：
+ *    1.down waiting;
+ *    2.获取返回值，释放子进程表元素;
+ * 
+ * 父进程exit操作的前置要求：
+ * 首先需要down editing信号量
+ * 随后需要检查子进程表元素的 child 是否为NULL
+ * 如果是，那么就代表子进程已经释放自身，直接释放进程表元素（注意释放editing）
+ * 如果不是，那么：
+ *    1.将子进程的 self 设置为 NULL;
+ *    2.释放进程表元素;
+ *    3.up editing;
+ * 
  * 状态码：
  * -1 进程尚未执行完毕（初始值，父进程exec的时候设置）
  * 0 进程成功退出（子进程执行exit的时候设置）
@@ -39,15 +67,12 @@ struct file_desc {
  * 
  * 地址：
  * 父进程执行exec设置child指向子进程PCB地址
- * 子进程exit正常退出的时候将地址设置为NULL
- * 子进程异常退出的时候将值设置为NULL、
+ * 且退出的时候使用此地址将子进程的父地址设置为NULL
  * 
- * 信号量：
- * 初始值为0
- * 考虑到一个父进程只能等待一次子进程
- * 因此该父进程等待子进程时就需要将信号量down
- * 随后每个子进程退出的时候都需要up信号量
- * 此时如果父进程被唤醒，那么父进程就需要清除此元素
+ * waiting信号量：
+ * 用于协调等待相关的事宜
+ * 父进程如果在等待子进程，就会将这个值设置为down
+ * 子进程在退出的时候需要将这个值up
  * 
  * pid：
  * 需要让子进程来进行设置
@@ -56,10 +81,11 @@ struct file_desc {
  */
 
 struct child_process {
-  pid_t pid;       /* 子进程ID，执行exec的时候由子线程设置 */
-  uint32_t status; /* 退出状态，子进程执行exit的时候设置 */
-  struct semaphore waiting; /* 初始值为0的信号量，任何进程退出的时候都需要将这个信号量up一下 */
-  struct process* child; /* 子进程PCB地址，子进程exit时候需要将此设置为NULL */
+  pid_t pid;                 /* 子进程ID，执行exec的时候由子线程设置 */
+  uint32_t status;           /* 退出状态，子进程执行exit的时候设置 */
+  struct semaphore* editing; /* 初始值为0的信号量指针，子进程释放之身PCB之前需要down*/
+  struct semaphore waiting; /* 初始值为0的信号量，用于父进程向子进程说明是否正在等待*/
+  struct process* child;    /* 子进程PCB地址 子进程退出的时候需要设其为NULL */
   struct list_elem elem;
 };
 
@@ -79,6 +105,7 @@ struct child_process {
    还需要包含一个子进程表
 * 
 * 进程调用文件系统之前设置锁，完成之后释放锁
+* 任何涉及到PCB的编辑操作必须获取edit，完成之后释放edit
 * 
 * 资源释放问题就不必再说了，记得在进程退出的时候全部释放掉
 *    
@@ -96,12 +123,15 @@ struct process {
   /* Owned by process.c. */
   uint32_t* pagedir;          /* Page directory. */
   struct process* parent;     /* 指向父进程 */
-  struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
+  struct child_process* self; /* 指向父进程中自身对应的子进程表元素 父进程退出的时候需要设其为NULL*/
   char process_name[16];      /* Name of the main thread */
+  struct semaphore* edit; /* 可否编辑PCB（初始化） */
+
   struct list files_tab; /* 元素是文件描述符表元素，也就是struct file_desc */
   struct lock files_lock; /* 文件描述符表的锁 */
   struct semaphore* filesys_sema; /* 全局文件系统信号量指针 */
   uint32_t files_next_desc; /* 下一文件描述符 */
+
   struct list children;  /* 元素是子进程表元素，也就是struct child_process */
   struct list threads; /* 元素是TCB */
 
