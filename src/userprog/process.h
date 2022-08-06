@@ -131,6 +131,7 @@ struct child_process {
 struct process {
   /* Owned by process.c. */
   uint32_t* pagedir;          /* Page directory. */
+  struct file* exec;
   struct process* parent;     /* 指向父进程 */
   char process_name[16];      /* Name of the main thread */
   

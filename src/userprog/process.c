@@ -20,7 +20,9 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/filesys_lock.h"
 
+struct semaphore* filesys_sema = NULL;/* 全局临时文件系统锁 */
 static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
@@ -45,6 +47,12 @@ struct init_pcb {
    简而言之，在这里执行主线程（进程）的初始化操作
    */
 void userprog_init(void) {
+
+  if (filesys_sema == NULL) {
+    malloc_type(filesys_sema);
+    sema_init(filesys_sema, 1);
+  }
+
   struct thread* t = thread_current();
   bool success;
 
@@ -220,7 +228,10 @@ static void start_process(void* init_pcb_) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
+    sema_down(filesys_sema);
+    /* 需要确保绝无可能出现page fault */
     success = load(file_name, &if_.eip, &if_.esp);
+    sema_up(filesys_sema);
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -426,6 +437,11 @@ void process_exit(int exit_code) {
     sema_up(pcb_to_free->filesys_sema); /* 文件系统执行操作时发生page fault */
   }
 
+  sema_down(filesys_sema);
+  file_allow_write(pcb_to_free->exec);
+  file_close(pcb_to_free->exec);
+  sema_up(filesys_sema);
+
   /* 释放文件描述符表，NULL 是必须设置的 */
   struct file_desc* file_pos = NULL;
   list_clean_each(file_pos, &(pcb_to_free->files_tab), elem) {
@@ -614,6 +630,10 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
     goto done;
   }
 
+  /* 防止修改可执行文件 */
+  file_deny_write(file);
+  t->pcb->exec = file;
+
   /* Read program headers. */
   file_ofs = ehdr.e_phoff;
   for (i = 0; i < ehdr.e_phnum; i++) {
@@ -677,7 +697,10 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
 
 done:
   /* We arrive here whether the load is successful or not. */
-  file_close(file);
+  if (!success) {
+    file_allow_write(file);
+    file_close(file);
+  }
   return success;
 }
 

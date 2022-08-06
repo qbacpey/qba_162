@@ -8,10 +8,11 @@
 #include "userprog/process.h"
 #include "filesys/file.h"
 #include "devices/input.h"
+#include "userprog/filesys_lock.h"
 
 static void syscall_handler(struct intr_frame*);
-static struct semaphore temporary;     /* 临时文件系统锁 */
-struct semaphore* filesys_sema = NULL; /* 全局临时文件系统锁 */
+
+
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
 int syscall_practice(uint32_t* args, struct process* pcb);
@@ -45,11 +46,6 @@ static inline bool check_boundary(void*);         /* 单参数系统调用检查
 static void syscall_handler(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
   struct process* pcb = thread_current()->pcb;
-
-  if (filesys_sema == NULL) {
-    sema_init(&temporary, 1);
-    filesys_sema = &temporary;
-  }
 
   /*
    * The following print statement, if uncommented, will print out the syscall
@@ -192,7 +188,7 @@ int syscall_open(uint32_t* args, struct process* pcb) {
 
   // printf("%s: open file%s\n", pcb->process_name, (char*)args[1]);
 
-  sema_down(filesys_sema);
+  
   pcb->filesys_sema = filesys_sema;
   new_file = filesys_open((char*)args[1]);
   sema_up(filesys_sema);
