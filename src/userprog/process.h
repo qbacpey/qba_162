@@ -136,7 +136,7 @@ struct process {
   
   struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
   struct list children;  /* 元素是子进程表元素，也就是struct child_process */
-  struct semaphore* editing; /* 可否编辑PCB（初始化） */
+  struct semaphore* editing; /* 初始值为1的信号量指针，子进程释放之身PCB之前需要down*/
   struct lock children_lock; /* 子进程表锁 */
 
   struct list files_tab; /* 元素是文件描述符表元素，也就是struct file_desc */

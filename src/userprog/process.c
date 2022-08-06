@@ -55,9 +55,33 @@ void userprog_init(void) {
      can come at any time and activate our pagedir */
   t->pcb = calloc(sizeof(struct process), 1);
   success = t->pcb != NULL;
-
   /* Kill the kernel if we did not succeed */
   ASSERT(success);
+
+  /* 进程表相关的逻辑 */
+  struct process* pcb = t->pcb;
+  list_init(&(pcb->children));
+
+  malloc_type(pcb->editing);
+  success = pcb->editing != NULL;
+  ASSERT(success);
+  sema_init(pcb->editing, 1);
+  lock_init(&(pcb->children_lock));
+
+  /* 文件描述表 */
+  list_init(&(pcb->files_tab));
+  lock_init(&(pcb->files_lock));
+
+  /* 要让自己有一个进程表元素对应 */
+  struct child_process* fake_child_elem = NULL;
+  malloc_type(fake_child_elem);
+  success = fake_child_elem != NULL;
+  ASSERT(success);
+  pcb->self = fake_child_elem;
+  fake_child_elem->editing = pcb->editing;
+  fake_child_elem->pid = t->tid;
+  fake_child_elem->exited = true;
+  fake_child_elem->child = pcb;
 }
 
 /* Starts a new thread running a user program loaded from
@@ -95,7 +119,7 @@ pid_t process_execute(const char* file_name) {
 
   bool success = false;
 
-  /* 初始化进程表元素 */
+  /* 向自己的进程表中加入这个元素 */
   struct child_process* child_elem = NULL;
   malloc_type(child_elem);
   success = child_elem != NULL;
@@ -110,7 +134,7 @@ pid_t process_execute(const char* file_name) {
   lock_release(children_lock);
 
   malloc_type(child_elem->editing);
-  success = success && child_elem->editing != NULL;
+  success = child_elem->editing != NULL;
   if (!success) {
     free(child_elem);
     return TID_ERROR;
@@ -119,14 +143,14 @@ pid_t process_execute(const char* file_name) {
 
   /* 初始化init_pcb */
   struct init_pcb* init_pcb_ = NULL;
-  success = success && init_pcb_ != NULL;
   malloc_type(init_pcb_);
+  success = success && init_pcb_ != NULL;
   if (!success) {
     free(child_elem->editing);
     free(child_elem);
     return TID_ERROR;
   }
-  success = success && init_pcb_ != NULL;
+  success = init_pcb_ != NULL;
   init_pcb_->editing = child_elem->editing;
   init_pcb_->self = child_elem;
   init_pcb_->parent = pcb;
@@ -204,6 +228,7 @@ static void start_process(void* init_pcb_) {
     struct process* pcb_to_free = t->pcb;
     t->pcb = NULL;
     free(pcb_to_free);
+    free_parent_self(init_pcb->self, -1, t->tid);
     goto done;
   }
 
@@ -300,9 +325,8 @@ done:
   /* 异常退出
      Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
-  palloc_free_page(init_pcb);
+  free(init_pcb);
   if (!success) {
-    free_parent_self(init_pcb->self, -1, t->tid);
     sema_up(&temporary);
     thread_exit();
     NOT_REACHED();
@@ -361,7 +385,7 @@ void process_exit(int exit_code) {
   uint32_t* pd;
 
   /* If this thread does not have a PCB, don't worry
-   * 直接退出
+   * 非用户进程 直接退出
    */
   if (cur->pcb == NULL) {
     thread_exit();
@@ -390,6 +414,7 @@ void process_exit(int exit_code) {
      can try to activate the pagedir, but it is now freed memory */
   /* 需要确保子进程编辑自己的PCB之前先获取父进程的锁 */
   struct process* pcb_to_free = cur->pcb;
+  pcb_to_free->self->status = exit_code;
 
   if (pcb_to_free->filesys_sema != NULL) {
     sema_up(pcb_to_free->filesys_sema); /* 文件系统执行操作时发生page fault */
@@ -410,18 +435,27 @@ void process_exit(int exit_code) {
   /* 释放子进程表 */
   struct child_process* child = NULL;
   list_clean_each(child, &(pcb_to_free->children), elem) {
-    // 子进程未退出，需要额外工作
-    if (!sema_try_down(&(child->waiting))) {
-      sema_down(&(child->child->edit));
-
-      sema_up();
+    if (sema_try_down(&(child->editing))) {
+      // 子进程已经退出
+      free_child_self(child);
+    } else {
+      // 子进程未退出，需要同步
+      sema_down(child->editing);
+      free_child_self(child);
+      sema_up(child->editing);
     }
-    free(child);
   }
   // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
   if (file_pos != NULL) {
-    file_close(file_pos->file);
-    free(file_pos);
+    if (sema_try_down(&(child->editing))) {
+      // 子进程已经退出
+      free_child_self(child);
+    } else {
+      // 子进程未退出，需要同步
+      sema_down(child->editing);
+      free_child_self(child);
+      sema_up(child->editing);
+    }
   }
 
   cur->pcb = NULL;
@@ -447,7 +481,7 @@ void process_activate(void) {
   tss_update();
 }
 
-/* **子进程**清除父子共同资源 */
+/* **子进程**清除父子共同资源 同时设置返回值*/
 static void free_parent_self(struct child_process* self, uint32_t exit_code, uint32_t tid) {
   /* 父进程已经退出 释放子进程表元素  */
   if (self->exited) {
@@ -459,12 +493,12 @@ static void free_parent_self(struct child_process* self, uint32_t exit_code, uin
     self->pid = tid;
     self->child = NULL;
     sema_up(&(self->waiting));
+    sema_up(self->editing);
   }
 }
 
-/* **父进程**清除父子共同资源 同时会将此元素从链表中剥离*/
+/* **父进程**清除父子共同资源 不会将此元素从链表中剥离*/
 static void free_child_self(struct child_process* child) {
-  list_remove(&(child->elem));
   /* 子进程已经退出 释放子进程表元素  */
   if (child->exited) {
     free(child->editing);
