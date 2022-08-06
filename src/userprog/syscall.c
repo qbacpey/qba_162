@@ -21,12 +21,13 @@ int syscall_open(uint32_t* args, struct process* pcb);
 int syscall_write(uint32_t* args, struct process* pcb);
 int syscall_filesize(uint32_t* args, struct process* pcb);
 int syscall_read(uint32_t* args, struct process* pcb);
-void syscall_seek(uint32_t* args, struct process* pcb);
+int syscall_seek(uint32_t* args, struct process* pcb);
 int syscall_close(uint32_t* args, struct process* pcb);
-unsigned syscall_tell(uint32_t* args, struct process* pcb);
+int syscall_tell(uint32_t* args, struct process* pcb);
 static inline bool check_fd(uint32_t,
                             struct process*); /* fd系统调用检查，仅检查是否大于下一个文件标识符 */
 static inline bool check_buffer(void*, uint32_t); /* 三参数系统调用检查 */
+static inline bool check_boundary(void*);         /* 单参数系统调用检查 */
 
 /* 
  * userprog/syscall.c（也就是本文件）的作用实际上就一个：分发系统调用
@@ -63,64 +64,87 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
   switch (args[0]) {
     case SYS_EXIT:
-      f->eax = args[1];
-      printf("%s: exit(%d)\n", pcb->process_name, args[1]);
-      process_exit(f->eax);
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = args[1];
+        printf("%s: exit(%d)\n", pcb->process_name, args[1]);
+        process_exit(f->eax);
+      }
       break;
 
     case SYS_PRACTICE:
-      f->eax = syscall_practice(args, pcb);
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = beneath ? syscall_practice(args, pcb) : -1;
+      }
       break;
 
     case SYS_CREATE:
-      beneath = (void*)args[1] != NULL && check_buffer((void*)args[1], strlen((char*)args[1]));
+      beneath = check_boundary(args + 2) && (void*)args[1] != NULL &&
+                check_buffer((void*)args[1], strlen((char*)args[1]));
       if (beneath) {
         f->eax = syscall_create(args, pcb);
       }
       break;
 
     case SYS_REMOVE:
-      beneath = (void*)args[1] != NULL && check_buffer((void*)args[1], strlen((char*)args[1]));
+      beneath = check_boundary(args + 1) && (void*)args[1] != NULL &&
+                check_buffer((void*)args[1], strlen((char*)args[1]));
       if (beneath) {
         f->eax = syscall_remove(args, pcb);
       }
       break;
 
     case SYS_OPEN:
-      beneath = (void*)args[1] != NULL && check_buffer((void*)args[1], strlen((char*)args[1]));
+      beneath = check_boundary(args + 1) && (void*)args[1] != NULL &&
+                check_buffer((void*)args[1], strlen((char*)args[1]));
       if (beneath) {
         f->eax = syscall_open(args, pcb);
       }
       break;
 
     case SYS_FILESIZE:
-      f->eax = check_fd(args[1], pcb) ? syscall_filesize(args, pcb) : -1;
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = check_fd(args[1], pcb) ? syscall_filesize(args, pcb) : -1;
+      }
       break;
 
     case SYS_READ:
-      beneath = (void*)args[2] != NULL && check_buffer((void*)args[2], args[3]);
+      beneath = check_boundary(args + 3) && (void*)args[2] != NULL &&
+                check_buffer((void*)args[2], args[3]);
       if (beneath) {
         f->eax = check_fd(args[1], pcb) ? syscall_read(args, pcb) : -1;
       }
       break;
 
     case SYS_WRITE:
-      beneath = (void*)args[2] != NULL && check_buffer((void*)args[2], args[3]);
+      beneath = check_boundary(args + 3) && (void*)args[2] != NULL &&
+                check_buffer((void*)args[2], args[3]);
       if (beneath) {
         f->eax = check_fd(args[1], pcb) ? syscall_write(args, pcb) : -1;
       }
       break;
 
     case SYS_SEEK:
-      f->eax = syscall_write(args, pcb);
+      beneath = check_boundary(args + 2);
+      if (beneath) {
+        f->eax = check_fd((uint32_t)args[1], pcb) ? syscall_seek(args, pcb) : -1;
+      }
       break;
 
     case SYS_TELL:
-      f->eax = syscall_write(args, pcb);
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = check_fd((uint32_t)args[1], pcb) ? syscall_tell(args, pcb) : -1;
+      }
       break;
 
     case SYS_CLOSE:
-      f->eax = check_fd((uint32_t)args[1], pcb) ? syscall_close(args, pcb) : -1;
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = check_fd((uint32_t)args[1], pcb) ? syscall_close(args, pcb) : -1;
+      }
       break;
 
     default:
@@ -224,6 +248,9 @@ int syscall_close(uint32_t* args, struct process* pcb) {
 int syscall_filesize(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
   int size = -1;
+  if (fd < 3) {
+    return size;
+  }
   struct list* files_tab = &(pcb->files_tab);
   struct lock* files_tab_lock = &(pcb->files_lock);
   struct file_desc* pos = NULL;
@@ -238,6 +265,51 @@ int syscall_filesize(uint32_t* args, struct process* pcb) {
   lock_release(files_tab_lock);
 
   return size;
+}
+
+int syscall_tell(uint32_t* args, struct process* pcb){
+  uint32_t fd = args[1];
+  int size = -1;
+  if (fd < 3) {
+    return size;
+  }
+  struct list* files_tab = &(pcb->files_tab);
+  struct lock* files_tab_lock = &(pcb->files_lock);
+  struct file_desc* pos = NULL;
+
+  lock_acquire(files_tab_lock);
+  list_for_each_entry(pos, files_tab, elem) {
+    if (pos->file_desc == fd) {
+      size = (int)file_tell(pos->file);
+      break;
+    }
+  }
+  lock_release(files_tab_lock);
+
+  return size;
+}
+
+int syscall_seek(uint32_t* args, struct process* pcb) {
+  uint32_t fd = args[1];
+  int result = -1;
+  if (fd < 3) {
+    return result;
+  }
+  struct list* files_tab = &(pcb->files_tab);
+  struct lock* files_tab_lock = &(pcb->files_lock);
+  struct file_desc* pos = NULL;
+
+  lock_acquire(files_tab_lock);
+  list_for_each_entry(pos, files_tab, elem) {
+    if (pos->file_desc == fd) {
+      file_seek(pos->file, args[2]);
+      result = 0;
+      break;
+    }
+  }
+  lock_release(files_tab_lock);
+
+  return result;
 }
 
 int syscall_read(uint32_t* args, struct process* pcb) {
@@ -302,5 +374,7 @@ int syscall_write(uint32_t* args, struct process* pcb) {
 
 static inline bool check_fd(uint32_t fd, struct process* pcb) { return pcb->files_next_desc >= fd; }
 static inline bool check_buffer(void* buffer, uint32_t size) {
-  return (void*)(buffer + size) < (void*)0xbffffffc;
+  return (void*)(buffer + size) <= (void*)0xbffffffe;
 }
+
+static inline bool check_boundary(void* buffer) { return (void*)(buffer) < (void*)0xbffffffe; }

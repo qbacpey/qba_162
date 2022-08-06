@@ -21,7 +21,7 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
-static struct semaphore temporary;
+static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp);
@@ -52,7 +52,12 @@ void userprog_init(void) {
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
-   before process_execute() returns.  Returns the new process's
+   before process_execute() returns.
+  （这个说法实际上有点迷糊，它实际上指的是parent process 执行完 thread_create 之后，
+   函数返回之前新线程有可能会被立即执行，
+   并不是指代新线程会在此函数执行的任意位置都有可能被执行）  
+   
+   Returns the new process's
    process id, or TID_ERROR if the thread cannot be created. 
    
    似乎要在这里支持命令行参数
@@ -68,31 +73,40 @@ pid_t process_execute(const char* file_name) {
   fn_copy = palloc_get_page(0);
   if (fn_copy == NULL)
     return TID_ERROR;
-  /* file_name的第一个空格设置为\0 */
+  /* 
+   * file_name的第一个空格设置为\0 
+   * 拷贝系统调用参数到内核 
+   * 
+   * */
+
   strlcpy(fn_copy, file_name, PGSIZE);
   char *token, *save_ptr;
   fn_copy = strtok_r(fn_copy, " ", &save_ptr);
 
-  /* Create a new thread to execute FILE_NAME. */
+  /* Create a new thread to execute FILE_NAME. 
+   * 从这一句开始，child就有可能打断parent并开始执行 
+   */
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
+  /* 返回进程ID给process_wait（注意，此时的线程是parent） */
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void start_process(void* file_name_) {
+  /* 注意，此时的线程是child */
   char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
 
-  /* Allocate process control block */
+  /* 分配PCB空间 */
   struct process* new_pcb = malloc(sizeof(struct process));
   success = pcb_success = new_pcb != NULL;
 
-  /* Initialize process control block */
+  /* 初始化PCB */
   if (success) {
     // Ensure that timer_interrupt() -> schedule() -> process_activate()
     // does not try to activate our uninitialized pagedir
@@ -124,26 +138,6 @@ static void start_process(void* file_name_) {
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(file_name, &if_.eip, &if_.esp);
   }
-  /* 
-   * 就参数传递而言
-   * 更准确的讲，应该修改的地方是这里
-   * filename需要修改一下 
-   * */
-  int null_pos = 0;
-  while ('\0' != file_name[null_pos]) {
-    null_pos++;
-  }
-  file_name[null_pos] = ' ';
-
-  /* 
-   * 
-   * 应该是在这个地方初始化线程启动参数
-   * 
-   * 说实话，参数传递这里非常好实现：
-   * 
-   * 1.解析并复制file_name
-   * 
-   */
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
   if (!success && pcb_success) {
@@ -153,6 +147,7 @@ static void start_process(void* file_name_) {
     struct process* pcb_to_free = t->pcb;
     t->pcb = NULL;
     free(pcb_to_free);
+    goto done;
   }
 
   /*
@@ -174,6 +169,13 @@ static void start_process(void* file_name_) {
    * 
    * if_.esp -= 0x14;
    * */
+
+  /* 将之前替换掉的'\0'换成' ' */
+  int null_pos = 0;
+  while ('\0' != file_name[null_pos]) {
+    null_pos++;
+  }
+  file_name[null_pos] = ' ';
 
   /* 拷贝字符串 */
   int raw_char_count = strlen(file_name) + 1;
@@ -237,6 +239,7 @@ static void start_process(void* file_name_) {
   if_.esp -= 0x4;
 
   
+  done:
   /* Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
   if (!success) {
