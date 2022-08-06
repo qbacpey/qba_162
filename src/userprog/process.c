@@ -24,8 +24,17 @@
 static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
+static void free_parent_self(struct child_process*, uint32_t, uint32_t);
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
+
+/* 用于在父子用户进程之间传递参数的 */
+struct init_pcb {
+  struct process* parent;
+  struct child_process* self;
+  struct semaphore* editing;
+  char* file_name_;
+};
 
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
@@ -60,11 +69,15 @@ void userprog_init(void) {
    Returns the new process's
    process id, or TID_ERROR if the thread cannot be created. 
    
-   似乎要在这里支持命令行参数
+   这是原版的函数原型：pid_t process_execute(const char* file_name)
+
    */
 pid_t process_execute(const char* file_name) {
   char* fn_copy;
   tid_t tid;
+  struct process* pcb = thread_current()->pcb;
+  struct list* children = &(pcb->children);
+  struct lock* children_lock = &(pcb->children_lock);
 
   // 文件全局信号量？
   sema_init(&temporary, 0);
@@ -73,20 +86,40 @@ pid_t process_execute(const char* file_name) {
   fn_copy = palloc_get_page(0);
   if (fn_copy == NULL)
     return TID_ERROR;
-  /* 
-   * file_name的第一个空格设置为\0 
-   * 拷贝系统调用参数到内核 
-   * 
-   * */
 
+  /* file_name的第一个空格设置为\0 拷贝系统调用参数到内核 */
   strlcpy(fn_copy, file_name, PGSIZE);
   char *token, *save_ptr;
   fn_copy = strtok_r(fn_copy, " ", &save_ptr);
 
+  /* 初始化进程表元素 */
+  struct child_process* child_elem = NULL;
+  malloc_type(child_elem);
+  malloc_type(child_elem->editing);
+  sema_init(child_elem->editing, 1);
+  sema_init(&(child_elem->waiting), 0);
+  child_elem->pid = -1;
+  child_elem->child = NULL;
+  lock_acquire(children_lock);
+  list_push_front(children, &(child_elem->elem));
+  lock_release(children_lock);
+
+  /* 初始化init_pcb */
+  struct init_pcb* init_pcb_ = NULL;
+  malloc_type(init_pcb_);
+  struct child_process* ptr_to_self = NULL;
+  malloc_type(ptr_to_self);
+  init_pcb_->editing = child_elem->editing;
+  init_pcb_->self = ptr_to_self;
+  init_pcb_->parent = pcb;
+  init_pcb_->file_name_ = fn_copy;
+
   /* Create a new thread to execute FILE_NAME. 
+   *
    * 从这一句开始，child就有可能打断parent并开始执行 
    */
-  tid = thread_create(fn_copy, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
+
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
   /* 返回进程ID给process_wait（注意，此时的线程是parent） */
@@ -95,9 +128,11 @@ pid_t process_execute(const char* file_name) {
 
 /* A thread function that loads a user process and starts it
    running. */
-static void start_process(void* file_name_) {
+static void start_process(void* init_pcb_) {
   /* 注意，此时的线程是child */
-  char* file_name = (char*)file_name_;
+  struct init_pcb* init_pcb = (struct init_pcb*)init_pcb_;
+  sema_down(init_pcb->editing);
+  char* file_name = init_pcb->file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
@@ -120,7 +155,10 @@ static void start_process(void* file_name_) {
     t->pcb->filesys_sema = NULL;
 
     // 初始化子进程表
-    list_init ( &(t->pcb->children) );
+    t->pcb->self = init_pcb->self;
+    list_init(&(t->pcb->children));
+    t->pcb->editing = init_pcb->editing;
+    lock_init(&t->pcb->children_lock);
 
     // 初始化线程表
     // list_init ( &(t->pcb->threads) );
@@ -181,7 +219,7 @@ static void start_process(void* file_name_) {
   int raw_char_count = strlen(file_name) + 1;
   if_.esp -= (raw_char_count);
   strlcpy(if_.esp, file_name, raw_char_count);
-  char *token = if_.esp;
+  char* token = if_.esp;
   /* 对齐4byte */
   if_.esp = (void*)((uint32_t)if_.esp & 0xfffffff0);
 
@@ -192,15 +230,15 @@ static void start_process(void* file_name_) {
   byte_counter += 4;
   if_.esp -= 4;
   *(uint32_t*)if_.esp = 0;
-  
+
   /* argv 一会再设置 */
   byte_counter += 4;
   if_.esp -= 4;
   *(uint32_t*)if_.esp = 0;
-  
+
   /* 使用strtok对fn_copy进行处理 */
-  
-  char *save_ptr;
+
+  char* save_ptr;
   int argc = 0;
   for (token = strtok_r(token, " ", &save_ptr); token != NULL;
        token = strtok_r(NULL, " ", &save_ptr)) {
@@ -238,13 +276,16 @@ static void start_process(void* file_name_) {
   /* 伪装返回值 */
   if_.esp -= 0x4;
 
-  
-  done:
-  /* Clean up. Exit on failure or jump to userspace */
+done:
+  /* 异常退出
+     Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
+  palloc_free_page(init_pcb);
   if (!success) {
+    free_parent_self(init_pcb->self, -1, t->tid);
     sema_up(&temporary);
     thread_exit();
+    NOT_REACHED();
   }
 
   /* Start the user process by simulating a return from an
@@ -256,6 +297,7 @@ static void start_process(void* file_name_) {
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
 }
+
 
 /* Waits for process with PID child_pid to die and returns its exit status.
    If it was terminated by the kernel (i.e. killed due to an
@@ -322,19 +364,14 @@ void process_exit(int exit_code) {
     pagedir_destroy(pd);
   }
 
- 
   /* Free the PCB of this process and kill this thread
      Avoid race where PCB is freed before t->pcb is set to NULL
      If this happens, then an unfortuantely timed timer interrupt
      can try to activate the pagedir, but it is now freed memory */
   /* 需要确保子进程编辑自己的PCB之前先获取父进程的锁 */
   struct process* pcb_to_free = cur->pcb;
-  if(pcb_to_free->self != NULL){
-    sema_down
 
-  }
-
-  if(pcb_to_free->filesys_sema != NULL){
+  if (pcb_to_free->filesys_sema != NULL) {
     sema_up(pcb_to_free->filesys_sema); /* 文件系统执行操作时发生page fault */
   }
 
@@ -354,7 +391,7 @@ void process_exit(int exit_code) {
   struct child_process* child = NULL;
   list_clean_each(child, &(pcb_to_free->children), elem) {
     // 子进程未退出，需要额外工作
-    if(!sema_try_down(&(child->waiting))){
+    if (!sema_try_down(&(child->waiting))) {
       sema_down(&(child->child->edit));
 
       sema_up();
@@ -388,6 +425,20 @@ void process_activate(void) {
   /* Set thread's kernel stack for use in processing interrupts.
      This does nothing if this is not a user process. */
   tss_update();
+}
+
+static void free_parent_self(struct child_process* self, uint32_t exit_code, uint32_t tid) {
+  /* 父进程已经退出 释放子进程表元素  */
+  if (self->exited) {
+    free(self->editing);
+    free(self);
+  } else {
+    self->exited = true;
+    self->status = exit_code;
+    self->pid = tid;
+    self->child = NULL;
+    sema_up(&(self->waiting));
+  }
 }
 
 /* We load ELF binaries.  The following definitions are taken
@@ -759,16 +810,16 @@ void pthread_exit_main(void) {}
 
 /* Reads a byte at user virtual address UADDR. UADDR must be below PHYS_BASE.
 Returns the byte value if successful, -1 if a segfault occurred. */
-static int get_user (const uint8_t *uaddr) {
-int result;
-asm ("movl $1f, %0; movzbl %1, %0; 1:" : "=&a" (result) : "m" (*uaddr));
-return result;
+static int get_user(const uint8_t* uaddr) {
+  int result;
+  asm("movl $1f, %0; movzbl %1, %0; 1:" : "=&a"(result) : "m"(*uaddr));
+  return result;
 }
 
 /* Writes BYTE to user address UDST. UDST must be below PHYS_BASE. Returns
 true if successful, false if a segfault occurred. */
-static bool put_user (uint8_t *udst, uint8_t byte) {
-int error_code;
-asm ("movl $1f, %0; movb %b2, %1; 1:" : "=&a" (error_code), "=m" (*udst) : "q" (byte));
-return error_code != -1;
+static bool put_user(uint8_t* udst, uint8_t byte) {
+  int error_code;
+  asm("movl $1f, %0; movb %b2, %1; 1:" : "=&a"(error_code), "=m"(*udst) : "q"(byte));
+  return error_code != -1;
 }
