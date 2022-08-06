@@ -25,6 +25,7 @@ static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static void free_parent_self(struct child_process*, uint32_t, uint32_t);
+static void free_child_self(struct child_process*);
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 
@@ -92,11 +93,15 @@ pid_t process_execute(const char* file_name) {
   char *token, *save_ptr;
   fn_copy = strtok_r(fn_copy, " ", &save_ptr);
 
+  bool success = false;
+
   /* 初始化进程表元素 */
   struct child_process* child_elem = NULL;
   malloc_type(child_elem);
-  malloc_type(child_elem->editing);
-  sema_init(child_elem->editing, 1);
+  success = child_elem != NULL;
+  if (!success) {
+    return TID_ERROR;
+  }
   sema_init(&(child_elem->waiting), 0);
   child_elem->pid = -1;
   child_elem->child = NULL;
@@ -104,13 +109,26 @@ pid_t process_execute(const char* file_name) {
   list_push_front(children, &(child_elem->elem));
   lock_release(children_lock);
 
+  malloc_type(child_elem->editing);
+  success = success && child_elem->editing != NULL;
+  if (!success) {
+    free(child_elem);
+    return TID_ERROR;
+  }
+  sema_init(child_elem->editing, 1);
+
   /* 初始化init_pcb */
   struct init_pcb* init_pcb_ = NULL;
+  success = success && init_pcb_ != NULL;
   malloc_type(init_pcb_);
-  struct child_process* ptr_to_self = NULL;
-  malloc_type(ptr_to_self);
+  if (!success) {
+    free(child_elem->editing);
+    free(child_elem);
+    return TID_ERROR;
+  }
+  success = success && init_pcb_ != NULL;
   init_pcb_->editing = child_elem->editing;
-  init_pcb_->self = ptr_to_self;
+  init_pcb_->self = child_elem;
   init_pcb_->parent = pcb;
   init_pcb_->file_name_ = fn_copy;
 
@@ -120,6 +138,7 @@ pid_t process_execute(const char* file_name) {
    */
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
 
+  done:
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
   /* 返回进程ID给process_wait（注意，此时的线程是parent） */
@@ -158,7 +177,7 @@ static void start_process(void* init_pcb_) {
     t->pcb->self = init_pcb->self;
     list_init(&(t->pcb->children));
     t->pcb->editing = init_pcb->editing;
-    lock_init(&t->pcb->children_lock);
+    lock_init(&(t->pcb->children_lock));
 
     // 初始化线程表
     // list_init ( &(t->pcb->threads) );
@@ -188,7 +207,8 @@ static void start_process(void* init_pcb_) {
     goto done;
   }
 
-  /*
+  /* 参数传递
+   *
    * 说到底这里的作用应该是向用户栈里边压入初始参数
    * 也就是Argc Argv那些玩意
    * 但是现在不知道这两个参数被放在了什么地方
@@ -427,6 +447,7 @@ void process_activate(void) {
   tss_update();
 }
 
+/* **子进程**清除父子共同资源 */
 static void free_parent_self(struct child_process* self, uint32_t exit_code, uint32_t tid) {
   /* 父进程已经退出 释放子进程表元素  */
   if (self->exited) {
@@ -438,6 +459,20 @@ static void free_parent_self(struct child_process* self, uint32_t exit_code, uin
     self->pid = tid;
     self->child = NULL;
     sema_up(&(self->waiting));
+  }
+}
+
+/* **父进程**清除父子共同资源 同时会将此元素从链表中剥离*/
+static void free_child_self(struct child_process* child) {
+  list_remove(&(child->elem));
+  /* 子进程已经退出 释放子进程表元素  */
+  if (child->exited) {
+    free(child->editing);
+    free(child);
+  } else {
+    child->exited = true;
+    child->child->parent = NULL;
+    sema_up(&(child->waiting));
   }
 }
 
