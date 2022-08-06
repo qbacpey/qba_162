@@ -325,6 +325,7 @@ done:
   /* 异常退出
      Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
+  sema_up(init_pcb->editing);
   free(init_pcb);
   if (!success) {
     sema_up(&temporary);
@@ -435,7 +436,7 @@ void process_exit(int exit_code) {
   /* 释放子进程表 */
   struct child_process* child = NULL;
   list_clean_each(child, &(pcb_to_free->children), elem) {
-    if (sema_try_down(&(child->editing))) {
+    if (sema_try_down(child->editing)) {
       // 子进程已经退出
       free_child_self(child);
     } else {
@@ -446,8 +447,8 @@ void process_exit(int exit_code) {
     }
   }
   // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
-  if (file_pos != NULL) {
-    if (sema_try_down(&(child->editing))) {
+  if (child != NULL) {
+    if (sema_try_down(child->editing)) {
       // 子进程已经退出
       free_child_self(child);
     } else {
