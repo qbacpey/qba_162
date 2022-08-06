@@ -68,6 +68,7 @@ void userprog_init(void) {
   sema_init(pcb->editing, 1);
   lock_init(&(pcb->children_lock));
 
+
   /* 文件描述表 */
   list_init(&(pcb->files_tab));
   lock_init(&(pcb->files_lock));
@@ -77,7 +78,9 @@ void userprog_init(void) {
   malloc_type(fake_child_elem);
   success = fake_child_elem != NULL;
   ASSERT(success);
+
   pcb->self = fake_child_elem;
+  sema_init(&(fake_child_elem->waiting), 0);
   fake_child_elem->editing = pcb->editing;
   fake_child_elem->pid = t->tid;
   fake_child_elem->exited = true;
@@ -322,8 +325,7 @@ static void start_process(void* init_pcb_) {
   if_.esp -= 0x4;
 
 done:
-  /* 异常退出
-     Clean up. Exit on failure or jump to userspace */
+  /* 异常退出 Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
   sema_up(init_pcb->editing);
   free(init_pcb);
@@ -415,7 +417,10 @@ void process_exit(int exit_code) {
      can try to activate the pagedir, but it is now freed memory */
   /* 需要确保子进程编辑自己的PCB之前先获取父进程的锁 */
   struct process* pcb_to_free = cur->pcb;
-  pcb_to_free->self->status = exit_code;
+  struct semaphore* editing = pcb_to_free->editing;
+  sema_down(editing);
+  free_parent_self(pcb_to_free->self, exit_code, cur->tid);
+  sema_up(editing);
 
   if (pcb_to_free->filesys_sema != NULL) {
     sema_up(pcb_to_free->filesys_sema); /* 文件系统执行操作时发生page fault */
@@ -436,11 +441,11 @@ void process_exit(int exit_code) {
   /* 释放子进程表 */
   struct child_process* child = NULL;
   list_clean_each(child, &(pcb_to_free->children), elem) {
-    if (sema_try_down(child->editing)) {
+    if (sema_try_down(&(child->waiting))) {
       // 子进程已经退出
       free_child_self(child);
     } else {
-      // 子进程未退出，需要同步
+      // 子进程未退出，需要获取editing
       sema_down(child->editing);
       free_child_self(child);
       sema_up(child->editing);
@@ -448,11 +453,11 @@ void process_exit(int exit_code) {
   }
   // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
   if (child != NULL) {
-    if (sema_try_down(child->editing)) {
+    if (sema_try_down(&(child->waiting))) {
       // 子进程已经退出
       free_child_self(child);
     } else {
-      // 子进程未退出，需要同步
+      // 子进程未退出，需要获取editing
       sema_down(child->editing);
       free_child_self(child);
       sema_up(child->editing);
@@ -494,7 +499,6 @@ static void free_parent_self(struct child_process* self, uint32_t exit_code, uin
     self->pid = tid;
     self->child = NULL;
     sema_up(&(self->waiting));
-    sema_up(self->editing);
   }
 }
 
