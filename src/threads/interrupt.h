@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef FPU_SIZE
+#define FPU_SIZE 108
+#endif
+
 /* Interrupts on or off? */
 enum intr_level {
   INTR_OFF, /* Interrupts disabled. */
@@ -14,7 +18,7 @@ enum intr_level intr_get_level(void);
 enum intr_level intr_set_level(enum intr_level);
 enum intr_level intr_enable(void);
 enum intr_level intr_disable(void);
-#define FPU_SIZE 108
+
 /* Interrupt stack frame. */
 struct intr_frame {
   /* Pushed by intr_entry in intr-stubs.S.

@@ -437,7 +437,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
-   returns a pointer to the frame's base. */
+   returns a pointer to the frame's base. （向下移动栈指针）*/
 static void* alloc_frame(struct thread* t, size_t size) {
   /* Stack data is always allocated in word-size units. */
   ASSERT(is_thread(t));
@@ -539,7 +539,21 @@ void thread_switch_tail(struct thread* prev) {
    thread to run and switches to it.
 
    It's not safe to call printf() until thread_switch_tail()
-   has completed. */
+   has completed. 
+
+   线程初次调度时的执行序列：
+   thread_create: 作用是手动初始化各函数的调用帧
+   switch_threads: 保存旧线程状态，加载新线程状态
+   switch_entry: 维护一下当前的栈，方便调用thread_switch_tail
+   thread_switch_tail: 清除旧线程
+   kernel_thread: 调用线程启动函数
+
+   线程非初次调度时的执行序列：
+   schedule: 调度器，在合适的时候执行switch_threads
+   switch_threads: 保存旧线程状态，加载新线程状态
+   thread_switch_tail: 清除旧线程，完成线程切换
+   
+   */
 static void schedule(void) {
   struct thread* cur = running_thread();
   struct thread* next = next_thread_to_run();
@@ -567,5 +581,9 @@ static tid_t allocate_tid(void) {
 }
 
 /* Offset of `stack' member within `struct thread'.
-   Used by switch.S, which can't figure it out on its own. */
+   Used by switch.S, which can't figure it out on its own. 
+
+   这东西估计是用来算struct thread中stack这个变量离
+   结构体地址的偏移量的
+*/
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);

@@ -1,6 +1,10 @@
 #ifndef THREADS_SWITCH_H
 #define THREADS_SWITCH_H
 
+#ifndef FPU_SIZE
+#define FPU_SIZE 108
+#endif
+
 #ifndef __ASSEMBLER__
 /* switch_thread()'s stack frame. */
 struct switch_threads_frame {
@@ -8,6 +12,7 @@ struct switch_threads_frame {
   uint32_t esi;        /*  4: Saved %esi. */
   uint32_t ebp;        /*  8: Saved %ebp. */
   uint32_t ebx;        /* 12: Saved %ebx. */
+  // uint8_t fpu_state[FPU_SIZE]; /* FPU的所有状态 使用fsave和frstore维护 */
   void (*eip)(void);   /* 16: Return address. */
   struct thread* cur;  /* 20: switch_threads()'s CUR argument. */
   struct thread* next; /* 24: switch_threads()'s NEXT argument. */
