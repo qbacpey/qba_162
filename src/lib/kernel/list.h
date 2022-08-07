@@ -115,7 +115,7 @@ struct list {
 * @member:     the name of the list_struct within the struct. 
  */
 #define list_for_each_entry(pos, list, member)                                                     \
-  for (pos = !list_empty(list) ? list_entry(list_begin(list), typeof(*pos), member) : NULL;    \
+  for (pos = list_entry(list_begin(list), typeof(*pos), member);    \
        &(pos->member) != list_end(list); pos = list_entry(pos->member.next, typeof(*pos), member))
 
 /** 

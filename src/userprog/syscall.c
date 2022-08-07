@@ -14,18 +14,18 @@
 static void syscall_handler(struct intr_frame*);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
-int syscall_practice(uint32_t* args, struct process* pcb);
-bool syscall_create(uint32_t* args, struct process* pcb);
-bool syscall_remove(uint32_t* args, struct process* pcb);
-pid_t syscall_exec(uint32_t* args, struct process* pcb);
-int syscall_wait(uint32_t* args, struct process* pcb);
-int syscall_open(uint32_t* args, struct process* pcb);
-int syscall_write(uint32_t* args, struct process* pcb);
-int syscall_filesize(uint32_t* args, struct process* pcb);
-int syscall_read(uint32_t* args, struct process* pcb);
-int syscall_seek(uint32_t* args, struct process* pcb);
-int syscall_close(uint32_t* args, struct process* pcb);
-int syscall_tell(uint32_t* args, struct process* pcb);
+static int syscall_practice(uint32_t* args, struct process* pcb);
+static bool syscall_create(uint32_t* args, struct process* pcb);
+static bool syscall_remove(uint32_t* args, struct process* pcb);
+static pid_t syscall_exec(uint32_t* args, struct process* pcb);
+static int syscall_wait(uint32_t* args, struct process* pcb);
+static int syscall_open(uint32_t* args, struct process* pcb);
+static int syscall_write(uint32_t* args, struct process* pcb);
+static int syscall_filesize(uint32_t* args, struct process* pcb);
+static int syscall_read(uint32_t* args, struct process* pcb);
+static int syscall_seek(uint32_t* args, struct process* pcb);
+static int syscall_close(uint32_t* args, struct process* pcb);
+static int syscall_tell(uint32_t* args, struct process* pcb);
 static inline bool check_fd(uint32_t,
                             struct process*); /* fd系统调用检查，仅检查是否大于下一个文件标识符 */
 static inline bool check_buffer(void*, uint32_t); /* 三参数系统调用检查 */
@@ -192,13 +192,12 @@ pid_t syscall_exec(uint32_t* args, struct process* pcb) {
   lock_acquire(children_lock);
   list_for_each_entry(child, children, elem) {
     if (child->pid == result) {
-
       sema_down(child->editing);
-      if (child->exited) {
-        /* PCB初始化失败 直接释放 */
+      if (!child->exited && child->exited_code == -1) {
+        /* 要么就是PCB初始化失败，要么就是在等待的时候已经搞完了，但是不应该由exec释放表中元素，到底还是得exit */
         result = -1;
         list_remove(&(child->elem));
-        free_child_self(child);
+        free(child);
       } else {
         /* PCB初始化成功  */
         sema_up(child->editing);
@@ -207,10 +206,15 @@ pid_t syscall_exec(uint32_t* args, struct process* pcb) {
     }
   }
   lock_release(children_lock);
+  // printf("children empty: %s\n", list_empty(&(pcb->children)) == 1 ? "true" : "false");
+
   return result;
 }
 
-int syscall_wait(uint32_t* args, struct process* pcb) { return process_wait(args[1]); }
+int syscall_wait(uint32_t* args, struct process* pcb) { 
+  
+  return process_wait(args[1]); 
+  }
 
 bool syscall_create(uint32_t* args, struct process* pcb) {
   bool result = false;

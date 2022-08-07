@@ -132,10 +132,11 @@ pid_t process_execute(const char* file_name) {
   sema_init(&(child_elem->waiting), 0);
   child_elem->pid = -1;
   child_elem->child = NULL;
+  child_elem->exited = false;
+  child_elem->exited_code = -2; /* 初始退出码为-2 */
   lock_acquire(children_lock);
   list_push_front(children, &(child_elem->elem));
   lock_release(children_lock);
-
   malloc_type(child_elem->editing);
   success = child_elem->editing != NULL;
   if (!success) {
@@ -179,6 +180,8 @@ pid_t process_execute(const char* file_name) {
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
   child_elem->pid = tid;
 
+
+
 done:
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
@@ -210,6 +213,7 @@ static void start_process(void* init_pcb_) {
   // does not try to activate our uninitialized pagedir
   new_pcb->pagedir = NULL;
   t->pcb = new_pcb;
+  t->pcb->parent = init_pcb->parent;
 
   // 初始化文件描述符表
   list_init(&(t->pcb->files_tab));
@@ -350,6 +354,8 @@ done:
   free(init_pcb);
   if (!success) {
     // sema_up(&temporary);
+    /* 如果是exited==false 但是exited_code=-1就说明PCB初始化错误 */
+    self->exited = false;
     sema_up(editing);
     thread_exit();
     NOT_REACHED();
@@ -382,9 +388,12 @@ int process_wait(pid_t child_pid) {
 
   int result = -1;
   struct thread* tcb = thread_current();
-  if (child_pid <= tcb->tid) {
-    return result;
-  }
+
+  // 子线程的id和父进程的id之间没有固定的关系 
+  // if (child_pid <= tcb->tid) {
+  //   return result;
+  // }
+
   struct process* pcb = tcb->pcb;
 
   struct list* children = &(pcb->children);
@@ -396,7 +405,6 @@ int process_wait(pid_t child_pid) {
       sema_down(&(child->waiting));
       result = child->exited_code;
       /* 此时必然已经执行完毕了 */
-      sema_up(&(child->waiting));
       list_remove(&(child->elem));
       free_child_self(child);
       break;
@@ -474,7 +482,6 @@ void process_exit(int exit_code) {
   }
 
   sema_down(filesys_sema);
-  file_allow_write(pcb_to_free->exec);
   file_close(pcb_to_free->exec);
   sema_up(filesys_sema);
 
@@ -489,7 +496,6 @@ void process_exit(int exit_code) {
     file_close(file_pos->file);
     free(file_pos);
   }
-
   /* 释放子进程表 */
   struct child_process* child = NULL;
   struct semaphore* child_editing = NULL;
@@ -505,6 +511,7 @@ void process_exit(int exit_code) {
       sema_up(child_editing);
     }
   }
+  
   // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
   if (child != NULL) {
     if (sema_try_down(&(child->waiting))) {
@@ -518,7 +525,6 @@ void process_exit(int exit_code) {
       sema_up(child_editing);
     }
   }
-
   cur->pcb = NULL;
   free(pcb_to_free);
 
