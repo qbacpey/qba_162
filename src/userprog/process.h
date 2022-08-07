@@ -90,8 +90,8 @@ struct file_desc {
 
 struct child_process {
   pid_t pid;                 /* 子进程ID，执行exec的时候由子线程设置 */
-  uint32_t exited_code;           /* 退出状态，子进程执行exit的时候设置 */
-  struct semaphore* editing; /* 初始值为1的信号量指针，子进程释放之身PCB之前需要down*/
+  int exited_code;           /* 退出状态，子进程执行exit的时候设置 */
+  struct semaphore* editing; /* 初始值为1的信号量指针，编辑此结构体之前需要down*/
   struct semaphore waiting; /* 初始值为0的信号量，等待相关的事件会使用到这个东西*/
   struct process* child; /* 子进程PCB地址 子进程退出的时候需要设其为NULL */
   bool exited; /* 父进程或子进程退出的时候需要将其设置为true */
@@ -156,6 +156,8 @@ pid_t process_execute(const char* file_name);
 int process_wait(pid_t);
 void process_exit(int);
 void process_activate(void);
+void free_parent_self(struct child_process*, int);
+void free_child_self(struct child_process*);
 
 bool is_main_thread(struct thread*, struct process*);
 pid_t get_pid(struct process*);

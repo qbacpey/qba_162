@@ -13,8 +13,6 @@
 
 static void syscall_handler(struct intr_frame*);
 
-
-
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
 int syscall_practice(uint32_t* args, struct process* pcb);
 bool syscall_create(uint32_t* args, struct process* pcb);
@@ -180,8 +178,39 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
 int syscall_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
 
-pid_t syscall_exec(uint32_t* args, struct process* pcb) {}
-int syscall_wait(uint32_t* args, struct process* pcb) {}
+pid_t syscall_exec(uint32_t* args, struct process* pcb) {
+
+  pid_t result = process_execute((const char *)args[1]);
+  if (result == -1) {
+    /* 线程初始化失败 */
+    return result;
+  }
+
+  struct list* children = &(pcb->children);
+  struct lock* children_lock = &(pcb->children_lock);
+  struct child_process* child = NULL;
+  lock_acquire(children_lock);
+  list_for_each_entry(child, children, elem) {
+    if (child->pid == result) {
+
+      sema_down(child->editing);
+      if (child->exited) {
+        /* PCB初始化失败 直接释放 */
+        result = -1;
+        list_remove(&(child->elem));
+        free_child_self(child);
+      } else {
+        /* PCB初始化成功  */
+        sema_up(child->editing);
+      }
+      break;
+    }
+  }
+  lock_release(children_lock);
+  return result;
+}
+
+int syscall_wait(uint32_t* args, struct process* pcb) { return process_wait(args[1]); }
 
 bool syscall_create(uint32_t* args, struct process* pcb) {
   bool result = false;
@@ -214,7 +243,6 @@ int syscall_open(uint32_t* args, struct process* pcb) {
 
   // printf("%s: open file%s\n", pcb->process_name, (char*)args[1]);
 
-  
   pcb->filesys_sema = filesys_sema;
   new_file = filesys_open((char*)args[1]);
   sema_up(filesys_sema);
@@ -289,7 +317,7 @@ int syscall_filesize(uint32_t* args, struct process* pcb) {
   return size;
 }
 
-int syscall_tell(uint32_t* args, struct process* pcb){
+int syscall_tell(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
   int size = -1;
   if (fd < 3) {

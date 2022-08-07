@@ -22,12 +22,10 @@
 #include "threads/vaddr.h"
 #include "userprog/filesys_lock.h"
 
-struct semaphore* filesys_sema = NULL;/* 全局临时文件系统锁 */
+struct semaphore* filesys_sema = NULL; /* 定义全局临时文件系统锁 */
 // static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static void free_parent_self(struct child_process*, uint32_t);
-static void free_child_self(struct child_process*);
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
 
@@ -36,7 +34,8 @@ struct init_pcb {
   struct process* parent;
   struct child_process* self;
   struct semaphore* editing;
-  char* file_name_;
+  char* cmd_line;
+  bool processed; /* 是否处理过 cmd_line*/
 };
 
 /* Initializes user programs in the system by ensuring the main
@@ -75,7 +74,6 @@ void userprog_init(void) {
   ASSERT(success);
   sema_init(pcb->editing, 1);
   lock_init(&(pcb->children_lock));
-
 
   /* 文件描述表 */
   list_init(&(pcb->files_tab));
@@ -123,13 +121,7 @@ pid_t process_execute(const char* file_name) {
   if (fn_copy == NULL)
     return TID_ERROR;
 
-  /* file_name的第一个空格设置为\0 拷贝系统调用参数到内核 */
-  strlcpy(fn_copy, file_name, PGSIZE);
-  char *token, *save_ptr;
-  fn_copy = strtok_r(fn_copy, " ", &save_ptr);
-
   bool success = false;
-
   /* 向自己的进程表中加入这个元素 */
   struct child_process* child_elem = NULL;
   malloc_type(child_elem);
@@ -165,18 +157,29 @@ pid_t process_execute(const char* file_name) {
   init_pcb_->editing = child_elem->editing;
   init_pcb_->self = child_elem;
   init_pcb_->parent = pcb;
-  init_pcb_->file_name_ = fn_copy;
+  init_pcb_->cmd_line = fn_copy;
+
+  /* file_name的第一个空格设置为\0 拷贝系统调用参数到内核 */
+  strlcpy(fn_copy, file_name, PGSIZE);
+  char *token, *save_ptr;
+  fn_copy = strtok_r(fn_copy, " ", &save_ptr);
+  if (strlen(fn_copy) != strlen(file_name)) {
+    init_pcb_->processed = true;
+  } else {
+    init_pcb_->processed = false;
+  }
 
   /* Create a new thread to execute FILE_NAME. 
    *
    * 从thread_create开始，child就有可能打断parent并开始执行 
-   * 为了父进程的wait不仅需要等待waiting，还需要的等待editing（防止在初始化PCB时打断）
+   * 为了父进程的wait不仅需要等待waiting，还需要等待editing（防止在初始化PCB时打断）
+   * 父进程需要等待子进程PCB初始化执行完毕
    */
   sema_down(init_pcb_->editing);
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
   child_elem->pid = tid;
 
-  done:
+done:
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
   /* 返回进程ID给process_wait（注意，此时的线程是parent） */
@@ -190,56 +193,56 @@ static void start_process(void* init_pcb_) {
   struct init_pcb* init_pcb = (struct init_pcb*)init_pcb_;
   struct child_process* self = init_pcb->self;
   struct semaphore* editing = init_pcb->editing;
-  char* file_name = init_pcb->file_name_;
+  char* file_name = init_pcb->cmd_line;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
 
   /* 分配PCB空间 */
   struct process* new_pcb = malloc(sizeof(struct process));
-  success = pcb_success = new_pcb != NULL;
+  success = new_pcb != NULL;
+  if (!success) {
+    goto done;
+  }
 
   /* 初始化PCB */
-  if (success) {
-    // Ensure that timer_interrupt() -> schedule() -> process_activate()
-    // does not try to activate our uninitialized pagedir
-    new_pcb->pagedir = NULL;
-    t->pcb = new_pcb;
+  // Ensure that timer_interrupt() -> schedule() -> process_activate()
+  // does not try to activate our uninitialized pagedir
+  new_pcb->pagedir = NULL;
+  t->pcb = new_pcb;
 
-    // 初始化文件描述符表
-    list_init(&(t->pcb->files_tab));
-    lock_init(&t->pcb->files_lock);
-    t->pcb->files_next_desc = 3;
-    t->pcb->filesys_sema = NULL;
+  // 初始化文件描述符表
+  list_init(&(t->pcb->files_tab));
+  lock_init(&t->pcb->files_lock);
+  t->pcb->files_next_desc = 3;
+  t->pcb->filesys_sema = NULL;
 
-    // 初始化子进程表
-    t->pcb->self = self;
-    list_init(&(t->pcb->children));
-    t->pcb->editing = editing;
-    lock_init(&(t->pcb->children_lock));
+  // 初始化子进程表
+  t->pcb->self = self;
+  list_init(&(t->pcb->children));
+  t->pcb->editing = editing;
+  lock_init(&(t->pcb->children_lock));
 
-    // 初始化线程表
-    // list_init ( &(t->pcb->threads) );
+  // 初始化线程表
+  // list_init ( &(t->pcb->threads) );
 
-    // Continue initializing the PCB as normal
-    t->pcb->main_thread = t;
-    strlcpy(t->pcb->process_name, t->name, sizeof t->name);
-  }
+  // Continue initializing the PCB as normal
+  t->pcb->main_thread = t;
+  strlcpy(t->pcb->process_name, t->name, sizeof t->name);
 
   /* Initialize interrupt frame and load executable. */
-  if (success) {
-    memset(&if_, 0, sizeof if_);
-    if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
-    if_.cs = SEL_UCSEG;
-    if_.eflags = FLAG_IF | FLAG_MBS;
-    sema_down(filesys_sema);
-    /* 需要确保绝无可能出现page fault */
-    success = load(file_name, &if_.eip, &if_.esp);
-    sema_up(filesys_sema);
-  }
+
+  memset(&if_, 0, sizeof if_);
+  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+  if_.cs = SEL_UCSEG;
+  if_.eflags = FLAG_IF | FLAG_MBS;
+  sema_down(filesys_sema);
+  /* 需要确保绝无可能出现page fault */
+  success = load(file_name, &if_.eip, &if_.esp);
+  sema_up(filesys_sema);
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
-  if (!success && pcb_success) {
+  if (!success) {
     // Avoid race where PCB is freed before t->pcb is set to NULL
     // If this happens, then an unfortuantely timed timer interrupt
     // can try to activate the pagedir, but it is now freed memory
@@ -271,12 +274,14 @@ static void start_process(void* init_pcb_) {
    * if_.esp -= 0x14;
    * */
 
-  /* 将之前替换掉的'\0'换成' ' */
-  int null_pos = 0;
-  while ('\0' != file_name[null_pos]) {
-    null_pos++;
+  /* 如果字符串被处理过 那么需要将之前替换掉的'\0'换成' ' */
+  if (init_pcb->processed) {
+    int null_pos = 0;
+    while ('\0' != file_name[null_pos]) {
+      null_pos++;
+    }
+    file_name[null_pos] = ' ';
   }
-  file_name[null_pos] = ' ';
 
   /* 拷贝字符串 */
   int raw_char_count = strlen(file_name) + 1;
@@ -381,23 +386,23 @@ int process_wait(pid_t child_pid) {
     return result;
   }
   struct process* pcb = tcb->pcb;
+
   struct list* children = &(pcb->children);
   struct lock* children_lock = &(pcb->children_lock);
-
   struct child_process* child = NULL;
   lock_acquire(children_lock);
   list_for_each_entry(child, children, elem) {
     if (child->pid == child_pid) {
-      sema_down(child->editing);
       sema_down(&(child->waiting));
       result = child->exited_code;
       /* 此时必然已经执行完毕了 */
       sema_up(&(child->waiting));
-      sema_up(child->editing);
+      list_remove(&(child->elem));
       free_child_self(child);
       break;
     }
   }
+  lock_release(children_lock);
   // sema_down(&temporary);
   return result;
 }
@@ -487,15 +492,17 @@ void process_exit(int exit_code) {
 
   /* 释放子进程表 */
   struct child_process* child = NULL;
+  struct semaphore* child_editing = NULL;
   list_clean_each(child, &(pcb_to_free->children), elem) {
     if (sema_try_down(&(child->waiting))) {
       // 子进程已经退出
       free_child_self(child);
     } else {
       // 子进程未退出，需要获取editing
-      sema_down(child->editing);
+      child_editing = child->editing;
+      sema_down(child_editing);
       free_child_self(child);
-      sema_up(child->editing);
+      sema_up(child_editing);
     }
   }
   // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
@@ -505,9 +512,10 @@ void process_exit(int exit_code) {
       free_child_self(child);
     } else {
       // 子进程未退出，需要获取editing
-      sema_down(child->editing);
+      child_editing = child->editing;
+      sema_down(child_editing);
       free_child_self(child);
-      sema_up(child->editing);
+      sema_up(child_editing);
     }
   }
 
@@ -535,7 +543,7 @@ void process_activate(void) {
 }
 
 /* **子进程**清除父子共同资源 同时设置返回值*/
-static void free_parent_self(struct child_process* self, uint32_t exit_code) {
+void free_parent_self(struct child_process* self, int exit_code) {
   /* 父进程已经退出 释放子进程表元素  */
   if (self->exited) {
     free(self->editing);
@@ -549,7 +557,7 @@ static void free_parent_self(struct child_process* self, uint32_t exit_code) {
 }
 
 /* **父进程**清除父子共同资源 不会将此元素从链表中剥离*/
-static void free_child_self(struct child_process* child) {
+void free_child_self(struct child_process* child) {
   /* 子进程已经退出 释放子进程表元素  */
   if (child->exited) {
     free(child->editing);
@@ -660,7 +668,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
     goto done;
   }
 
-  /* 防止修改可执行文件 */
+  /* TODO 应该在下面的goto也加上file_allow_write的 防止修改可执行文件 */
   file_deny_write(file);
   t->pcb->exec = file;
 
@@ -728,7 +736,6 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
 done:
   /* We arrive here whether the load is successful or not. */
   if (!success) {
-    file_allow_write(file);
     file_close(file);
   }
   return success;
