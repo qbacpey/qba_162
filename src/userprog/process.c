@@ -23,10 +23,10 @@
 #include "userprog/filesys_lock.h"
 
 struct semaphore* filesys_sema = NULL;/* 全局临时文件系统锁 */
-static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
+// static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static void free_parent_self(struct child_process*, uint32_t, uint32_t);
+static void free_parent_self(struct child_process*, uint32_t);
 static void free_child_self(struct child_process*);
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 bool setup_thread(void (**eip)(void), void** esp);
@@ -116,7 +116,7 @@ pid_t process_execute(const char* file_name) {
   struct lock* children_lock = &(pcb->children_lock);
 
   // 文件全局信号量？
-  sema_init(&temporary, 0);
+  // sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
@@ -169,9 +169,12 @@ pid_t process_execute(const char* file_name) {
 
   /* Create a new thread to execute FILE_NAME. 
    *
-   * 从这一句开始，child就有可能打断parent并开始执行 
+   * 从thread_create开始，child就有可能打断parent并开始执行 
+   * 为了父进程的wait不仅需要等待waiting，还需要的等待editing（防止在初始化PCB时打断）
    */
+  sema_down(init_pcb_->editing);
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
+  child_elem->pid = tid;
 
   done:
   if (tid == TID_ERROR)
@@ -185,7 +188,8 @@ pid_t process_execute(const char* file_name) {
 static void start_process(void* init_pcb_) {
   /* 注意，此时的线程是child */
   struct init_pcb* init_pcb = (struct init_pcb*)init_pcb_;
-  sema_down(init_pcb->editing);
+  struct child_process* self = init_pcb->self;
+  struct semaphore* editing = init_pcb->editing;
   char* file_name = init_pcb->file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
@@ -209,9 +213,9 @@ static void start_process(void* init_pcb_) {
     t->pcb->filesys_sema = NULL;
 
     // 初始化子进程表
-    t->pcb->self = init_pcb->self;
+    t->pcb->self = self;
     list_init(&(t->pcb->children));
-    t->pcb->editing = init_pcb->editing;
+    t->pcb->editing = editing;
     lock_init(&(t->pcb->children_lock));
 
     // 初始化线程表
@@ -242,7 +246,7 @@ static void start_process(void* init_pcb_) {
     struct process* pcb_to_free = t->pcb;
     t->pcb = NULL;
     free(pcb_to_free);
-    free_parent_self(init_pcb->self, -1, t->tid);
+    free_parent_self(self, -1);
     goto done;
   }
 
@@ -338,13 +342,17 @@ static void start_process(void* init_pcb_) {
 done:
   /* 异常退出 Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
-  sema_up(init_pcb->editing);
   free(init_pcb);
   if (!success) {
-    sema_up(&temporary);
+    // sema_up(&temporary);
+    sema_up(editing);
     thread_exit();
     NOT_REACHED();
   }
+  self->pid = t->tid;
+  self->child = t->pcb;
+  self->exited = false;
+  sema_up(editing);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -356,7 +364,6 @@ done:
   NOT_REACHED();
 }
 
-
 /* Waits for process with PID child_pid to die and returns its exit status.
    If it was terminated by the kernel (i.e. killed due to an
    exception), returns -1.  If child_pid is invalid or if it was not a
@@ -366,9 +373,33 @@ done:
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int process_wait(pid_t child_pid UNUSED) {
-  sema_down(&temporary);
-  return 0;
+int process_wait(pid_t child_pid) {
+
+  int result = -1;
+  struct thread* tcb = thread_current();
+  if (child_pid <= tcb->tid) {
+    return result;
+  }
+  struct process* pcb = tcb->pcb;
+  struct list* children = &(pcb->children);
+  struct lock* children_lock = &(pcb->children_lock);
+
+  struct child_process* child = NULL;
+  lock_acquire(children_lock);
+  list_for_each_entry(child, children, elem) {
+    if (child->pid == child_pid) {
+      sema_down(child->editing);
+      sema_down(&(child->waiting));
+      result = child->exited_code;
+      /* 此时必然已经执行完毕了 */
+      sema_up(&(child->waiting));
+      sema_up(child->editing);
+      free_child_self(child);
+      break;
+    }
+  }
+  // sema_down(&temporary);
+  return result;
 }
 
 /* Free the current process's resources. 
@@ -430,7 +461,7 @@ void process_exit(int exit_code) {
   struct process* pcb_to_free = cur->pcb;
   struct semaphore* editing = pcb_to_free->editing;
   sema_down(editing);
-  free_parent_self(pcb_to_free->self, exit_code, cur->tid);
+  free_parent_self(pcb_to_free->self, exit_code);
   sema_up(editing);
 
   if (pcb_to_free->filesys_sema != NULL) {
@@ -483,7 +514,7 @@ void process_exit(int exit_code) {
   cur->pcb = NULL;
   free(pcb_to_free);
 
-  sema_up(&temporary);
+  // sema_up(&temporary);
   thread_exit();
 }
 
@@ -504,15 +535,14 @@ void process_activate(void) {
 }
 
 /* **子进程**清除父子共同资源 同时设置返回值*/
-static void free_parent_self(struct child_process* self, uint32_t exit_code, uint32_t tid) {
+static void free_parent_self(struct child_process* self, uint32_t exit_code) {
   /* 父进程已经退出 释放子进程表元素  */
   if (self->exited) {
     free(self->editing);
     free(self);
   } else {
     self->exited = true;
-    self->status = exit_code;
-    self->pid = tid;
+    self->exited_code = exit_code;
     self->child = NULL;
     sema_up(&(self->waiting));
   }

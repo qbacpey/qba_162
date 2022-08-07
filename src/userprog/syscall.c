@@ -8,6 +8,7 @@
 #include "userprog/process.h"
 #include "filesys/file.h"
 #include "devices/input.h"
+#include "devices/shutdown.h"
 #include "userprog/filesys_lock.h"
 
 static void syscall_handler(struct intr_frame*);
@@ -18,6 +19,8 @@ void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "
 int syscall_practice(uint32_t* args, struct process* pcb);
 bool syscall_create(uint32_t* args, struct process* pcb);
 bool syscall_remove(uint32_t* args, struct process* pcb);
+pid_t syscall_exec(uint32_t* args, struct process* pcb);
+int syscall_wait(uint32_t* args, struct process* pcb);
 int syscall_open(uint32_t* args, struct process* pcb);
 int syscall_write(uint32_t* args, struct process* pcb);
 int syscall_filesize(uint32_t* args, struct process* pcb);
@@ -59,6 +62,11 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   f->eax = -1;
 
   switch (args[0]) {
+
+    case SYS_HALT:
+      shutdown_power_off();
+      break;
+
     case SYS_EXIT:
       beneath = check_boundary(args + 1);
       if (beneath) {
@@ -68,10 +76,18 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       }
       break;
 
-    case SYS_PRACTICE:
+    case SYS_EXEC:
+      beneath = check_boundary(args + 1) && (void*)args[1] != NULL &&
+                check_buffer((void*)args[1], strlen((char*)args[1]));
+      if (beneath) {
+        f->eax = syscall_exec(args, pcb);
+      }
+      break;
+
+    case SYS_WAIT:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = beneath ? syscall_practice(args, pcb) : -1;
+        f->eax = syscall_wait(args, pcb);
       }
       break;
 
@@ -143,6 +159,13 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       }
       break;
 
+    case SYS_PRACTICE:
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = beneath ? syscall_practice(args, pcb) : -1;
+      }
+      break;
+
     default:
       printf("Unknown system call number: %d\n", args[0]);
       process_exit(-1);
@@ -156,6 +179,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 }
 
 int syscall_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
+
+pid_t syscall_exec(uint32_t* args, struct process* pcb) {}
+int syscall_wait(uint32_t* args, struct process* pcb) {}
 
 bool syscall_create(uint32_t* args, struct process* pcb) {
   bool result = false;
