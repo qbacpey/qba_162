@@ -14,7 +14,7 @@ enum intr_level intr_get_level(void);
 enum intr_level intr_set_level(enum intr_level);
 enum intr_level intr_enable(void);
 enum intr_level intr_disable(void);
-
+#define FPU_SIZE 108
 /* Interrupt stack frame. */
 struct intr_frame {
   /* Pushed by intr_entry in intr-stubs.S.
@@ -27,6 +27,7 @@ struct intr_frame {
   uint32_t edx;       /* Saved EDX. */
   uint32_t ecx;       /* Saved ECX. */
   uint32_t eax;       /* Saved EAX. */
+  uint8_t fpu_state[FPU_SIZE]; /* FPU的所有状态 使用fsave和frstore维护 */
   uint16_t gs, : 16;  /* Saved GS segment register. */
   uint16_t fs, : 16;  /* Saved FS segment register. */
   uint16_t es, : 16;  /* Saved ES segment register. */

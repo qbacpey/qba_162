@@ -408,7 +408,7 @@ done:
   * 
   */
 
-  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
+  asm volatile("fninit : movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
 
   /* 关于指令执行的一点观察
    * 
