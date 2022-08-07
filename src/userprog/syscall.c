@@ -9,6 +9,7 @@
 #include "filesys/file.h"
 #include "devices/input.h"
 #include "devices/shutdown.h"
+#include "lib/float.h"
 #include "userprog/filesys_lock.h"
 
 static void syscall_handler(struct intr_frame*);
@@ -26,6 +27,7 @@ static int syscall_read(uint32_t* args, struct process* pcb);
 static int syscall_seek(uint32_t* args, struct process* pcb);
 static int syscall_close(uint32_t* args, struct process* pcb);
 static int syscall_tell(uint32_t* args, struct process* pcb);
+static double syscall_compute_e(uint32_t* args, struct process* pcb);
 static inline bool check_fd(uint32_t,
                             struct process*); /* fd系统调用检查，仅检查是否大于下一个文件标识符 */
 static inline bool check_buffer(void*, uint32_t); /* 三参数系统调用检查 */
@@ -164,6 +166,13 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       }
       break;
 
+    case SYS_COMPUTE_E:
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = beneath ? syscall_compute_e(args, pcb) : -1;
+      }
+      break;
+
     default:
       printf("Unknown system call number: %d\n", args[0]);
       process_exit(-1);
@@ -176,11 +185,20 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
 }
 
-int syscall_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
+static int syscall_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
 
-pid_t syscall_exec(uint32_t* args, struct process* pcb) {
+static double syscall_compute_e(uint32_t* args, struct process* pcb) {
 
-  pid_t result = process_execute((const char *)args[1]);
+  if (args[1] < 0) {
+    return -1.0;
+  }
+
+  return sys_sum_to_e(args[1]);
+}
+
+static pid_t syscall_exec(uint32_t* args, struct process* pcb) {
+
+  pid_t result = process_execute((const char*)args[1]);
   if (result == -1) {
     /* 线程初始化失败 */
     return result;
@@ -211,12 +229,12 @@ pid_t syscall_exec(uint32_t* args, struct process* pcb) {
   return result;
 }
 
-int syscall_wait(uint32_t* args, struct process* pcb) { 
+static int syscall_wait(uint32_t* args, struct process* pcb) { 
   
   return process_wait(args[1]); 
   }
 
-bool syscall_create(uint32_t* args, struct process* pcb) {
+static bool syscall_create(uint32_t* args, struct process* pcb) {
   bool result = false;
 
   sema_down(filesys_sema);
@@ -228,7 +246,7 @@ bool syscall_create(uint32_t* args, struct process* pcb) {
   return result;
 }
 
-bool syscall_remove(uint32_t* args, struct process* pcb) {
+static bool syscall_remove(uint32_t* args, struct process* pcb) {
   bool result = false;
 
   sema_down(filesys_sema);
@@ -240,7 +258,7 @@ bool syscall_remove(uint32_t* args, struct process* pcb) {
   return result;
 }
 
-int syscall_open(uint32_t* args, struct process* pcb) {
+static int syscall_open(uint32_t* args, struct process* pcb) {
   struct list* files_tab = &(pcb->files_tab);
   struct lock* files_tab_lock = &(pcb->files_lock);
   struct file* new_file = NULL;
@@ -269,7 +287,7 @@ int syscall_open(uint32_t* args, struct process* pcb) {
   }
 }
 
-int syscall_close(uint32_t* args, struct process* pcb) {
+static int syscall_close(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
   int result = -1;
   if (fd < 3) {
@@ -296,7 +314,7 @@ int syscall_close(uint32_t* args, struct process* pcb) {
   return result;
 }
 
-int syscall_filesize(uint32_t* args, struct process* pcb) {
+static int syscall_filesize(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
   int size = -1;
   if (fd < 3) {
@@ -318,7 +336,7 @@ int syscall_filesize(uint32_t* args, struct process* pcb) {
   return size;
 }
 
-int syscall_tell(uint32_t* args, struct process* pcb) {
+static int syscall_tell(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
   int size = -1;
   if (fd < 3) {
@@ -340,7 +358,7 @@ int syscall_tell(uint32_t* args, struct process* pcb) {
   return size;
 }
 
-int syscall_seek(uint32_t* args, struct process* pcb) {
+static int syscall_seek(uint32_t* args, struct process* pcb) {
   uint32_t fd = args[1];
   int result = -1;
   if (fd < 3) {
@@ -363,7 +381,7 @@ int syscall_seek(uint32_t* args, struct process* pcb) {
   return result;
 }
 
-int syscall_read(uint32_t* args, struct process* pcb) {
+static int syscall_read(uint32_t* args, struct process* pcb) {
   if (args[1] == 0) {
     for (uint32_t i = 0; i < (uint32_t)args[3]; i++) {
       *(uint8_t*)(args[2] + i) = input_getc();
@@ -394,7 +412,7 @@ int syscall_read(uint32_t* args, struct process* pcb) {
   return off;
 }
 
-int syscall_write(uint32_t* args, struct process* pcb) {
+static int syscall_write(uint32_t* args, struct process* pcb) {
   if (args[1] == 1) {
     putbuf((char*)args[2], (size_t)args[3]);
     return 0;
