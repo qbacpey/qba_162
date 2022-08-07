@@ -287,13 +287,10 @@ int syscall_close(uint32_t* args, struct process* pcb) {
       sema_up(filesys_sema);
       pcb->filesys_sema = NULL;
       result = 0;
+      list_remove(&(pos->elem));
+      free(pos);
       break;
     }
-  }
-  // 没找到就不必移除了
-  if (pos != NULL) {
-    list_remove(&(pos->elem));
-    free(pos);
   }
   lock_release(files_tab_lock);
   return result;
