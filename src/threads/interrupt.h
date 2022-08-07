@@ -1,11 +1,12 @@
 #ifndef THREADS_INTERRUPT_H
 #define THREADS_INTERRUPT_H
-#ifndef FPU_SIZE
-#define FPU_SIZE 108
-#endif
 
 #include <stdbool.h>
 #include <stdint.h>
+
+#ifndef FPU_SIZE
+#define FPU_SIZE 108
+#endif
 
 /* Interrupts on or off? */
 enum intr_level {

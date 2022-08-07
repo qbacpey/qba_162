@@ -12,6 +12,10 @@
 #### restore the registers.  As part of switching stacks we record the
 #### current stack pointer in CUR's thread structure.
 
+# 简而言之，如果switch_threads的next是第一次被调度运行的线程
+# 那么switch_threads执行完后就会跳到switch_entry中
+# 最后就执行thread_switch_tail，完成整个初始化过程
+
 .globl switch_threads
 .func switch_threads
 switch_threads:
@@ -35,13 +39,20 @@ switch_threads:
 	mov thread_stack_ofs, %edx
 
 	# Save current stack pointer to old thread's stack, if any.
+	# 获取switch_threads参数列表的第一个参数：struct thread* cur
 	movl SWITCH_CUR(%esp), %eax
-	movl %esp, (%eax,%edx,1)
+	# 将当前%esp（即直到pushl %edi为止的栈指针）保存到cur->stack中
+	movl %esp, FPU_SIZE(%eax,%edx,1)
 
 	# Restore stack pointer from new thread's stack.
+	# 获取switch_threads参数列表的第二个参数：struct thread* next
 	movl SWITCH_NEXT(%esp), %ecx
-	movl (%ecx,%edx,1), %esp
+	# 将当前栈指针修改为next->stack，切换到next的栈（注意，两个线程的栈位于同一地址空间）
+	movl FPU_SIZE(%ecx,%edx,1), %esp
 
+	恢复FPU
+	frstor (%esp)
+   	addl $108, %esp 
 	# Restore caller's register state.
 	frstor (%esp)
    	addl $FPU_SIZE, %esp 
@@ -58,6 +69,7 @@ switch_entry:
 	fninit
 	# Discard switch_threads() arguments.
 	addl $8, %esp
+	# finit
 
 	# Call thread_switch_tail(prev).
 	pushl %eax
