@@ -35,17 +35,20 @@ struct intr_frame {
   /* Pushed by intrNN_stub in intr-stubs.S. */
   uint32_t vec_no; /* Interrupt vector number. */
 
-  /* Sometimes pushed by the CPU,
+  /* Sometimes pushed by the CPU, 
        otherwise for consistency pushed as 0 by intrNN_stub.
        The CPU puts it just under `eip', but we move it here. */
   uint32_t error_code; /* Error code. */
 
   /* Pushed by intrNN_stub in intr-stubs.S.
+     中断帧指针？还是用户函数的帧指针？
+
        This frame pointer eases interpretation of backtraces. */
   void* frame_pointer; /* Saved EBP (frame pointer). */
 
   /* Pushed by the CPU.
-       These are the interrupted task's saved registers. */
+     被硬件保存的寄存器：(ss:esp) (eflags) (cs:eip) 所谓重要寄存器
+          These are the interrupted task's saved registers. */
   void (*eip)(void); /* Next instruction to execute. */
   uint16_t cs, : 16; /* Code segment for eip. */
   uint32_t eflags;   /* Saved CPU flags. */

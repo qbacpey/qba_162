@@ -370,8 +370,60 @@ done:
      threads/intr-stubs.S).  Because intr_exit takes all of its
      arguments on the stack in the form of a `struct intr_frame',
      we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
+     and jump to it. 
+  * 
+  * asm asm-qualifiers (AssemblerTemplate : OutputOperands : InputOperands : Clobbers)
+  * 本质上来说，可以将这种指令当成是一系列能将输入参数转换输出参数的低级指令集合
+  * 
+  * AssemblerTemplate: 汇编指令的模板，其中包含需要执行的汇编指令和令牌（即输入输出参数、goto参数）
+  * 
+  * "%%"表示汇编器模板中的单个"%"
+  * "%|""%{""%}"用于转义
+  * 
+  * OuputOperands: 会被汇编指令修改的C变量列表，以逗号分隔
+  * 
+  * 这是输出操作数的典型格式[ [asmSymbolicName] ] constraint (cvariablename)
+  * asmSymbolicName是该C变量的符号化名字，可以在汇编代码中使用%[name]引用这个变量
+  * 如果不使用asmSymbolicName为符号命名，那么就需要使用从零开始的位置符号对其进行引用
+  * %0表示所有参数中的第一个，%1表示第二个，以此类推
+  * 
+  * constraint指的是对操作数施加的限制（符号），
+  * 也能表示其允许分布的位置（字母）：用于声明可操作数可以被放在什么位置上（内存、立即数、寄存器...）
+  * "r"表示这个C表达式只能充当：寄存器
+  * "m"表示这个C表达式只能充当：内存
+  * "i"表示这个C表达式只能充当：立即数
+  * "g"表示这个C表达式既可充当：寄存器、内存、立即数
+  * 
+  * 输出操作数必须以"="或"+"开头
+  * 前者表示将会覆写这个变量（只写入），后者表示可能读也可能写
+  * 随后需要使用一个字母声明这个变量的可接受的位置（‘r’ for register and ‘m’ for memory）
+  * 
+  * 
+  * InputOperands: 会被AssemblerTemplate中的汇编指令读取的C表达式列表
+  * 
+  * Clobbers: 会被汇编指令修改的寄存器或者值列表
+  * 
+  * "memory"表示指令会可能将Input或者Output当成地址并读取其中的数据
+  * 
+  * 
+  */
+
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
+
+  /* 关于指令执行的一点观察
+   * 
+   * 1. 执行jmp以及call等指令，硬件会自动保存关键寄存器的值
+   *    相对的，iret 就会跳回原来的地方并恢复关键寄存器的值
+   * 
+   * 2. C内存中的结构体是按照定义的顺序向下长的，即如果直接使用
+   *    结构体的地址访问4byte数据的话，会访问到结构体的第一个元素
+   *    向上移4byte会访问到第二个元素
+   * 
+   * 3. 那么这里设置esp/eip这些本来应该由硬件维护的寄存器（关键寄存器）的意义在于
+   *    让 intr_exit 处的 iret 指令能利用 _if 中的数据直接跳转到程序的开始处
+   *    并开始执行用户程序
+   * 
+   */
   NOT_REACHED();
 }
 

@@ -14,11 +14,22 @@
    call intr_handler(), which actually handles the interrupt.
 
    We "fall through" to intr_exit to return from the interrupt.
+
+   x87 FPU state包括：FPU环境（x87 FPU environment）、处于FPU寄存器栈中的数据寄存器（data registers）
+   FPU环境包括：FPU控制寄存器（x87 FPU’s control registers）、FPU状态寄存器（x87 FPU’s status registers）
+
+   FSAVE会在保存完FPU状态（x87 FPU state）之后初始化FPU（效果如FINIT）
+   FRSTOR 会恢复所有东西
+   
+   FSAVE instruction checks for and handles pending unmasked 
+   floating-point exceptions before storing the FPU state; 
+   the FNSAVE instruction does not.
+
 */
 .func intr_entry
 intr_entry:
 	/* Save caller's registers. */
-	pushl %ds
+	pushl %ds # 尽管长度是2byte但是push和pop的时候还是按4byte计算
 	pushl %es
 	pushl %fs
 	pushl %gs
@@ -29,6 +40,7 @@ intr_entry:
 	mov $SEL_KDSEG, %eax	/* Initialize segment registers. */
 	mov %eax, %ds
 	mov %eax, %es
+   # 这里的56恰好指向中断桩所保存的%ebp 即caller的ebp
 	leal 56(%esp), %ebp	/* Set up frame pointer. */
 
 	/* Call interrupt handler. */
@@ -60,6 +72,8 @@ intr_exit:
            frame_pointer members. */
 	addl $12, %esp
 
+   # 确保栈中只剩下5个关键寄存器
+
         /* Return to caller. */
 	iret
 .endfunc
@@ -72,6 +86,15 @@ intr_exit:
    the address of each of these functions in the correct spot in
    `intr_stubs', an array of function pointers.
 
+   第一，任何地方触发中断都会跳到这个地方随后根据中断号调用合适的中断处理函数
+         向栈中压入部分数据之后（%ebp、错误码、中断号）
+         随后才会跳到intr_entry
+   第二，这里的栈是向下长的
+   第三，push和pop的单位是4byte，使用%esp作为栈指针
+   另外，pushl (%esp)的意思是将%esp所指向的地址中的内容压到esp中
+         随后下移4byte
+
+
    Most of the stubs do this:
 
         1. Push %ebp on the stack (frame_pointer in `struct intr_frame').
@@ -82,7 +105,9 @@ intr_exit:
 
    The CPU pushes an extra "error code" on the stack for a few
    interrupts.  Because we want %ebp to be where the error code
-   is, we follow a different path:
+   is, we follow a different path:（注意，错误码有时候也会被CPU压入）、
+
+   此时的原本的ebp位置成了错误码，因此需要修改一下栈的布局
 
         1. Push a duplicate copy of the error code on the stack.
 
