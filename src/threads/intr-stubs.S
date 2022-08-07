@@ -34,6 +34,7 @@ intr_entry:
 	pushl %fs
 	pushl %gs
    subl $108, %esp 
+   fwait
    fsave (%esp)
 	pushal
 
@@ -42,8 +43,8 @@ intr_entry:
 	mov $SEL_KDSEG, %eax	/* Initialize segment registers. */
 	mov %eax, %ds
 	mov %eax, %es
-   # 这里的56恰好指向中断桩所保存的%ebp 即caller的ebp
-	leal 56(%esp), %ebp	/* Set up frame pointer. */
+   # 这里的56 + 108恰好指向中断桩所保存的%ebp 即caller的ebp
+	leal 164(%esp), %ebp	/* Set up frame pointer. */
 
 	/* Call interrupt handler. */
 	pushl %esp

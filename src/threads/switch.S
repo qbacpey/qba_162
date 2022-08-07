@@ -27,12 +27,13 @@ switch_threads:
 	#
 	# This stack frame must match the one set up by thread_create()
 	# in size.
+	subl $FPU_SIZE, %esp 
+	fwait
+   	fsave (%esp)
 	pushl %ebx
 	pushl %ebp
 	pushl %esi
 	pushl %edi
-	subl $FPU_SIZE, %esp 
-   	fsave (%esp)
 
 	# Get offsetof (struct thread, stack).
 .globl thread_stack_ofs
@@ -42,34 +43,30 @@ switch_threads:
 	# 获取switch_threads参数列表的第一个参数：struct thread* cur
 	movl SWITCH_CUR(%esp), %eax
 	# 将当前%esp（即直到pushl %edi为止的栈指针）保存到cur->stack中
-	movl %esp, FPU_SIZE(%eax,%edx,1)
+	movl %esp, (%eax,%edx,1)
 
 	# Restore stack pointer from new thread's stack.
 	# 获取switch_threads参数列表的第二个参数：struct thread* next
 	movl SWITCH_NEXT(%esp), %ecx
 	# 将当前栈指针修改为next->stack，切换到next的栈（注意，两个线程的栈位于同一地址空间）
-	movl FPU_SIZE(%ecx,%edx,1), %esp
+	movl (%ecx,%edx,1), %esp
 
-	恢复FPU
-	frstor (%esp)
-   	addl $108, %esp 
 	# Restore caller's register state.
-	frstor (%esp)
-   	addl $FPU_SIZE, %esp 
 	popl %edi
 	popl %esi
 	popl %ebp
 	popl %ebx
+	# 恢复FPU
+	frstor (%esp)
+   	addl $FPU_SIZE, %esp 
         ret
 .endfunc
 
 .globl switch_entry
 .func switch_entry
 switch_entry:
-	fninit
 	# Discard switch_threads() arguments.
 	addl $8, %esp
-	# finit
 
 	# Call thread_switch_tail(prev).
 	pushl %eax
@@ -77,6 +74,7 @@ switch_entry:
 	call thread_switch_tail
 	addl $4, %esp
 
+	fninit
 	# Start thread proper.
 	ret
 .endfunc

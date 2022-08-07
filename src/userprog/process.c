@@ -257,6 +257,9 @@ static void start_process(void* init_pcb_) {
     goto done;
   }
 
+  /* 需要确保if_中的状态是FPU的初始状态 */
+  asm("fninit; fsave (%0)" : : "g"(&if_.fpu_state));
+
   /* 参数传递
    *
    * 说到底这里的作用应该是向用户栈里边压入初始参数
@@ -408,7 +411,7 @@ done:
   * 
   */
 
-  asm volatile("fninit : movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
+  asm volatile(" movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
 
   /* 关于指令执行的一点观察
    * 
