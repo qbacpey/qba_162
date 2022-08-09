@@ -122,7 +122,7 @@ pid_t process_execute(const char* file_name) {
     return TID_ERROR;
 
   bool success = false;
-  /* 向自己的进程表中加入这个元素 */
+  /* 向自己的进程表中加入新进程 */
   struct child_process* child_elem = NULL;
   malloc_type(child_elem);
   success = child_elem != NULL;
@@ -145,7 +145,7 @@ pid_t process_execute(const char* file_name) {
   }
   sema_init(child_elem->editing, 1);
 
-  /* 初始化init_pcb */
+  /* 初始化init_pcb（即start_process的参数） */
   struct init_pcb* init_pcb_ = NULL;
   malloc_type(init_pcb_);
   success = success && init_pcb_ != NULL;
@@ -164,6 +164,7 @@ pid_t process_execute(const char* file_name) {
   strlcpy(fn_copy, file_name, PGSIZE);
   char *token, *save_ptr;
   fn_copy = strtok_r(fn_copy, " ", &save_ptr);
+  /* 与start_process协作，用于标识是否对文件名字符串进行了替换 */
   if (strlen(fn_copy) != strlen(file_name)) {
     init_pcb_->processed = true;
   } else {
@@ -173,8 +174,10 @@ pid_t process_execute(const char* file_name) {
   /* Create a new thread to execute FILE_NAME. 
    *
    * 从thread_create开始，child就有可能打断parent并开始执行 
-   * 为了父进程的wait不仅需要等待waiting，还需要等待editing（防止在初始化PCB时打断）
-   * 父进程需要等待子进程PCB初始化执行完毕
+   * 为此，父进程的wait不仅需要等待waiting，
+   * 还需要等待editing（当然child初始化PCB完成之后无论成功与否都需要释放editing）
+   * 这主要是防止在child PCB未初始化完成时，父进程就访问其数据了
+   * （父进程需要等待子进程PCB初始化执行完毕）
    */
   sema_down(init_pcb_->editing);
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
@@ -445,12 +448,12 @@ int process_wait(pid_t child_pid) {
   struct thread* tcb = thread_current();
 
   // 子线程的id和父进程的id之间没有固定的关系 
+  // 因此下面这些代码被注释掉了，用来引以为戒
   // if (child_pid <= tcb->tid) {
   //   return result;
   // }
 
   struct process* pcb = tcb->pcb;
-
   struct list* children = &(pcb->children);
   struct lock* children_lock = &(pcb->children_lock);
   struct child_process* child = NULL;
@@ -458,8 +461,8 @@ int process_wait(pid_t child_pid) {
   list_for_each_entry(child, children, elem) {
     if (child->pid == child_pid) {
       sema_down(&(child->waiting));
+      /* 此时child必然已经执行完毕了 */
       result = child->exited_code;
-      /* 此时必然已经执行完毕了 */
       list_remove(&(child->elem));
       free_child_self(child);
       break;
@@ -540,7 +543,7 @@ void process_exit(int exit_code) {
   file_close(pcb_to_free->exec);
   sema_up(filesys_sema);
 
-  /* 释放文件描述符表，NULL 是必须设置的 */
+  /* 释放文件描述符表，必须使用 NULL 进行初始化 */
   struct file_desc* file_pos = NULL;
   list_clean_each(file_pos, &(pcb_to_free->files_tab), elem) {
     file_close(file_pos->file);
@@ -551,23 +554,24 @@ void process_exit(int exit_code) {
     file_close(file_pos->file);
     free(file_pos);
   }
+
   /* 释放子进程表 */
   struct child_process* child = NULL;
   struct semaphore* child_editing = NULL;
   list_clean_each(child, &(pcb_to_free->children), elem) {
+    // 这里的信号量实际上相当于引用计数，false=2，true=1
     if (sema_try_down(&(child->waiting))) {
-      // 子进程已经退出
+      // 子进程已经退出，直接释放即可
       free_child_self(child);
     } else {
-      // 子进程未退出，需要获取editing
+      // 子进程未退出，需要获取editing，再进一步进行操作
       child_editing = child->editing;
       sema_down(child_editing);
       free_child_self(child);
       sema_up(child_editing);
     }
-  }
-  
-  // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
+  }  
+  // 尾部的if语句是必要的
   if (child != NULL) {
     if (sema_try_down(&(child->waiting))) {
       // 子进程已经退出
@@ -580,6 +584,8 @@ void process_exit(int exit_code) {
       sema_up(child_editing);
     }
   }
+
+  /* 资源全部释放 */
   cur->pcb = NULL;
   free(pcb_to_free);
 
@@ -603,13 +609,14 @@ void process_activate(void) {
   tss_update();
 }
 
-/* **子进程**清除父子共同资源 同时设置返回值*/
+/* 子进程退出时 由子进程清除父子共同资源 同时设置返回值*/
 void free_parent_self(struct child_process* self, int exit_code) {
-  /* 父进程已经退出 释放子进程表元素  */
   if (self->exited) {
+    /* 父进程已经退出 释放子进程表元素  */
     free(self->editing);
     free(self);
   } else {
+    /* 父进程尚未退出 需要设置引用计数、返回值、waiting */
     self->exited = true;
     self->exited_code = exit_code;
     self->child = NULL;
@@ -617,13 +624,14 @@ void free_parent_self(struct child_process* self, int exit_code) {
   }
 }
 
-/* **父进程**清除父子共同资源 不会将此元素从链表中剥离*/
+/* 父进程退出时 由父进程清除父子共同资源 不会将此元素从链表中剥离*/
 void free_child_self(struct child_process* child) {
-  /* 子进程已经退出 释放子进程表元素  */
   if (child->exited) {
+    /* 子进程已经退出 释放子进程表元素  */
     free(child->editing);
     free(child);
   } else {
+    /* 子进程尚未退出 需要设置引用计数 */
     child->exited = true;
     child->child->parent = NULL;
     sema_up(&(child->waiting));

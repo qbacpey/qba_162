@@ -14,8 +14,7 @@
  * 为PTR指针分配typeof(PRY)大小的一块内存
  * 
  */
-#define malloc_type(PTR)\
-PTR = (typeof(*PTR)(*))malloc(sizeof(typeof(*PTR)))
+#define malloc_type(PTR) PTR = (typeof (*PTR)(*))malloc(sizeof(typeof(*PTR)))
 
 /* PIDs and TIDs are the same type. PID should be
    the TID of the main thread of the process */
@@ -28,19 +27,20 @@ typedef void (*stub_fun)(pthread_fun, void*);
 /* 文件描述符表元素 
  * 
  * 开启即创建，关闭即释放
- * 创建的时候跳转到最后递增
+ * 创建的时候使用files_next_desc作为本文件的文件描述符
+ * 随后将这个值进行递增处理
  * 
  */
 struct file_desc {
   uint32_t file_desc; /* 文件描述符，从3开始 */
-  struct file* file;         /* 文件指针，务必注意释放问题 */
+  struct file* file;  /* 文件指针，务必注意释放问题 */
   struct list_elem elem;
 };
 
 /* 子进程表元素 
  * 
  * 确保获锁顺序为：editing->waiting
- * 谁后退出谁释放的资源包括：子进程表元素、editing
+ * 谁后退出谁释放的资源包括：子进程表元素本身、editing
  * 
  * 子进程退出操作的前置要求：
  * 首先需要down editing信号量
@@ -79,8 +79,26 @@ struct file_desc {
  * 
  * waiting信号量：
  * 用于协调等待相关的事宜
- * 父进程如果在等待子进程，就会将这个值设置为down
- * 子进程在退出的时候需要将这个值up
+ * 父进程如果在等待子进程，就会将这个值down
+ * 子进程在退出的时候无条件将这个值up
+ * 随后父进程就能获取子进程退出码了
+ * 
+ * editing信号量：
+ * 用来标识child_process结构体目前是不是可编辑状态
+ * 初始值为1，表示可编辑
+ * process_execute执行thread_create之前会将其down为0
+ * 目的是为了防止其他线程访问到尚未被初始化完成的PCB
+ * start_process执行完毕后会将这个值up
+ * 
+ * 
+ * exited引用计数：
+ * 用于标识现在还有多少个进程可能会访问这个结构体
+ * 由于Pintos中没有继承的概念，此结构体的引用计数使用了bool进行实现
+ * 如果是false，那么就代表引用计数为2；如果是true，那么引用计数为1
+ * 
+ * 无论是父进程还是子进程退出之前，都需要根据这个值来确定接下来的行为
+ * 简单来说，后退出的进程需要将这个结构体释放掉
+ * 具体的行为参考process_exit中的注释
  * 
  * pid：
  * 需要让子进程来进行设置
@@ -94,7 +112,7 @@ struct child_process {
   struct semaphore* editing; /* 初始值为1的信号量指针，编辑此结构体之前需要down*/
   struct semaphore waiting; /* 初始值为0的信号量，等待相关的事件会使用到这个东西*/
   struct process* child; /* 子进程PCB地址 子进程退出的时候需要设其为NULL */
-  bool exited; /* 父进程或子进程退出的时候需要将其设置为true */
+  bool exited;           /* 父进程或子进程退出的时候需要将其设置为true */
   struct list_elem elem;
 };
 
@@ -130,20 +148,20 @@ struct child_process {
 */
 struct process {
   /* Owned by process.c. */
-  uint32_t* pagedir;          /* Page directory. */
+  uint32_t* pagedir; /* Page directory. */
   struct file* exec;
-  struct process* parent;     /* 指向父进程 */
-  char process_name[16];      /* Name of the main thread */
-  
-  struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
-  struct list children;  /* 元素是子进程表元素，也就是struct child_process */
-  struct semaphore* editing; /* 初始值为1的信号量指针，子进程释放之身PCB之前需要down*/
-  struct lock children_lock; /* 子进程表锁 */
+  struct process* parent; /* 指向父进程 */
+  char process_name[16];  /* Name of the main thread */
 
-  struct list files_tab; /* 元素是文件描述符表元素，也就是struct file_desc */
+  struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
+  struct list children;       /* 元素是子进程表元素，也就是struct child_process */
+  struct lock children_lock;  /* 子进程表锁 */
+  struct semaphore* editing; /* 初始值为1的信号量指针，子进程释放之身PCB之前需要down*/
+
+  struct list files_tab;  /* 元素是文件描述符表元素，也就是struct file_desc */
   struct lock files_lock; /* 文件描述符表的锁 */
   struct semaphore* filesys_sema; /* 全局文件系统信号量指针 */
-  uint32_t files_next_desc; /* 下一文件描述符 */
+  uint32_t files_next_desc;       /* 下一文件描述符 */
 
   struct list threads; /* 元素是TCB */
 
