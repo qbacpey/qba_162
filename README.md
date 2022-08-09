@@ -1,4 +1,3 @@
-CS 162 Group Repository
-=======================
-
-This repository contains code for CS 162 group projects.
+162 的小组作业
+================
+为了避免麻烦（具体来说是被Processor找上），没有使用这门课的完整名字
