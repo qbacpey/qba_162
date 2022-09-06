@@ -4,10 +4,33 @@
 
 /* Main interrupt entry point.
 
+   整个中断的函数调用过程可归纳如下（现在假设是由硬件计时器引发的外部中断）：
+
+   1.硬件计时器：触发外部中断，保存`struct intr_frame'中的三个关键值到中断栈中
+     随后跳转到intr_stub
+
+   2.intr_stub继续将`struct intr_frame'中的
+     frame_pointer, error_code, and vec_no保存到中断栈中
+     随后跳转到intr_entry（中断处理程序下半部分）
+
+   3.intr_entry将`struct intr_frame'中的所有寄存器保存到栈中
+     也就是为调用intr_handler函数配置参数
+     同时需要设置各种寄存器，如%eax/%ebp等
+     随后调用intr_handler（中断处理程序下半部分）
+
+   4.intr_handler的作用实际上就是调用合适的中断处理器上半部分
+     如果是外部中断，那么它会确保中断处理器上半部分执行过程中中断始终被禁用
+     随后中断处理程序就会根据intr_frame中的error_code调用合适的处理程序
+     （之所以能回来说不定是因为leal 164(%esp), %ebp）
+     待中断处理程序执行完毕之后此函数返回的时候就会"滑"到intr_exit中
+   
+   5.intr_exit：退出，作用基本是将中断栈里的除了三个关键值之外的寄存器弹出
+     
+
    An internal or external interrupt starts in one of the
    intrNN_stub routines, which push the `struct intr_frame'
    frame_pointer, error_code, and vec_no members on the stack,
-   then jump here.
+   then jump here.（这部分工作由硬件来完成）
 
    We save the rest of the `struct intr_frame' members to the
    stack, set up some registers as needed by the kernel, and then
@@ -28,7 +51,10 @@
 */
 .func intr_entry
 intr_entry:
-	/* Save caller's registers. */
+	/* Save caller's registers.
+   
+   接续intr_stub的工作（frame_pointer, error_code, and vec_no已被保存）
+   继续保存interrupt.h中的struct intr_frame */
 	pushl %ds # 尽管长度是2byte但是push和pop的时候还是按4byte计算
 	pushl %es
 	pushl %fs
@@ -43,7 +69,11 @@ intr_entry:
 	mov $SEL_KDSEG, %eax	/* Initialize segment registers. */
 	mov %eax, %ds
 	mov %eax, %es
-   # 这里的56 + 108恰好指向中断桩所保存的%ebp 即caller的ebp
+
+   /* 164 = 56 + 108
+
+      164(%esp) 指向的地址中恰好保存着指向struct intr_frame的frame_pointer
+      其中保存的地址似乎是struct intr_frame在内核栈中的的起始地址 */ 
 	leal 164(%esp), %ebp	/* Set up frame pointer. */
 
 	/* Call interrupt handler. */

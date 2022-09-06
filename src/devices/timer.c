@@ -73,8 +73,19 @@ int64_t timer_ticks(void) {
    should be a value once returned by timer_ticks(). */
 int64_t timer_elapsed(int64_t then) { return timer_ticks() - then; }
 
-/* Sleeps for approximately TICKS timer ticks.  Interrupts must
-   be turned on. */
+/* 
+ * Sleeps for approximately TICKS timer ticks.  Interrupts must
+ * be turned on. 
+ * 
+ * This function suspends execution of the calling thread until time has
+ * advanced by at least x timer ticks. Unless the system is otherwise idle, the
+ * thread need not wake up after exactly x ticks. Just put it on the ready queue
+ * after they have waited for the right number of ticks. The argument to
+ * timer_sleep() is expressed in timer ticks, not in milliseconds or any another
+ * unit. There are TIMER_FREQ timer ticks per second, where TIMER_FREQ is a
+ * constant defined in devices/timer.h (spoiler: it's 100 ticks per second).
+ * 
+ * */
 void timer_sleep(int64_t ticks) {
   int64_t start = timer_ticks();
 

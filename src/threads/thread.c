@@ -182,7 +182,13 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
 
   ASSERT(function != NULL);
 
-  /* Allocate thread. */
+  /* 
+   * Allocate thread. 
+   * 
+   * 向内核申请4Kib内存页
+   * 用于保存线程结构体和内核栈
+   * 
+   */
   t = palloc_get_page(PAL_ZERO);
   if (t == NULL)
     return TID_ERROR;
@@ -191,7 +197,14 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
 
-  /* Stack frame for kernel_thread(). */
+  /* 
+   * Stack frame for kernel_thread(). 
+   * 
+   * 手动初始化kernel_thread()的函数调用帧
+   * 这个函数的作用即是调用thread_func* function
+   * 因此可以被认为是kernel_thread()函数的桩
+   * 
+   * */
   kf = alloc_frame(t, sizeof *kf);
   kf->eip = NULL;
   kf->function = function;
@@ -206,7 +219,13 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   sf->eip = switch_entry;
   sf->ebp = 0;
 
-  /* Add to run queue. */
+  /* 
+   * Add to run queue. 
+   * 
+   * 初始化内核线程初始调用栈完毕
+   * 
+   * 
+   * */
   thread_unblock(t);
 
   return tid;
@@ -247,7 +266,13 @@ static void thread_enqueue(struct thread* t) {
    This function does not preempt the running thread.  This can
    be important: if the caller had disabled interrupts itself,
    it may expect that it can atomically unblock a thread and
-   update other data. */
+   update other data. 
+
+   作用就是将线程从waiting queue从拿出来，放到ready queue中
+   虽然此函数当前实现**仅仅**是粗暴地将其归入ready queue中
+   之前也提到当前系统中的同步原语实现是禁用中断
+   
+   */
 void thread_unblock(struct thread* t) {
   enum intr_level old_level;
 
@@ -265,7 +290,10 @@ const char* thread_name(void) { return thread_current()->name; }
 
 /* Returns the running thread.
    This is running_thread() plus a couple of sanity checks.
-   See the big comment at the top of thread.h for details. */
+   See the big comment at the top of thread.h for details. 
+   
+   使用当前线程的esp获取线程的TCB（TCB一定位于线程内存页的底部）
+   此函数仅仅是running_thread的包装而已 */
 struct thread* thread_current(void) {
   struct thread* t = running_thread();
 
@@ -390,7 +418,14 @@ static void idle(void* idle_started_ UNUSED) {
   }
 }
 
-/* Function used as the basis for a kernel thread. */
+/** 
+ * Function used as the basis for a kernel thread. 
+ * 
+ * 作为function的桩，这个函数有三个作用：
+ * 1.启用中断
+ * 2.运行function（线程初始调度运行的时候就会执行此函数）
+ * 3.function返回之后调用thread_exit清除资源
+ * */
 static void kernel_thread(thread_func* function, void* aux) {
   ASSERT(function != NULL);
 
@@ -399,7 +434,9 @@ static void kernel_thread(thread_func* function, void* aux) {
   thread_exit(); /* If function() returns, kill the thread. */
 }
 
-/* Returns the running thread. */
+/* Returns the running thread. 
+
+   利用TCB必然分布在内存页底部的特性获取线程的TCB */
 struct thread* running_thread(void) {
   uint32_t* esp;
 
@@ -415,7 +452,10 @@ struct thread* running_thread(void) {
 static bool is_thread(struct thread* t) { return t != NULL && t->magic == THREAD_MAGIC; }
 
 /* Does basic initialization of T as a blocked thread named
-   NAME. */
+   NAME. 
+
+   初始化线程的4KB内存页
+   */
 static void init_thread(struct thread* t, const char* name, int priority) {
   enum intr_level old_level;
 
@@ -426,18 +466,31 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   memset(t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
-  t->stack = (uint8_t*)t + PGSIZE;
+  t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
   t->priority = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
-
+  
+  /* 
+   * 对all_list的操作需要 禁用中断
+   * 而且all_list中的线程是尚未结束的线程
+   * 无论是RUNNING还是WAITING都在里边
+   */
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
   intr_set_level(old_level);
 }
 
-/* Allocates a SIZE-byte frame at the top of thread T's stack and
-   returns a pointer to the frame's base. （向下移动栈指针）*/
+/* 
+ * Allocates a SIZE-byte frame at the top of thread T's stack and
+ * returns a pointer to the frame's base.
+ *  
+ * 这个函数的作用十分简单
+ * 给定线程TCB，将其向下移动size个byte而已
+ * 仅仅是移动内核线程的栈指针而已
+ * 然后返回新的栈指针
+ * 
+ * */
 static void* alloc_frame(struct thread* t, size_t size) {
   /* Stack data is always allocated in word-size units. */
   ASSERT(is_thread(t));
@@ -455,7 +508,7 @@ static struct thread* thread_schedule_fifo(void) {
     return idle_thread;
 }
 
-/* Strict priority scheduler */
+/* TODO Strict priority scheduler */
 static struct thread* thread_schedule_prio(void) {
   PANIC("Unimplemented scheduler policy: \"-sched=prio\"");
 }
@@ -542,7 +595,7 @@ void thread_switch_tail(struct thread* prev) {
    has completed. 
 
    线程初次调度时的执行序列：
-   thread_create: 作用是手动初始化各函数的调用帧
+   thread_create: 作用是手动初始化各函数的调用帧，将这些函数的调用栈压栈
    switch_threads: 保存旧线程状态，加载新线程状态
    switch_entry: 维护一下当前的栈，方便调用thread_switch_tail
    thread_switch_tail: 清除旧线程
@@ -555,7 +608,9 @@ void thread_switch_tail(struct thread* prev) {
    
    */
 static void schedule(void) {
+  /* 返回当前线程的TCB */
   struct thread* cur = running_thread();
+  /* 执行调度算法，返回下一时间片需要运行的线程的TCB */
   struct thread* next = next_thread_to_run();
   struct thread* prev = NULL;
 
@@ -563,8 +618,14 @@ static void schedule(void) {
   ASSERT(cur->status != THREAD_RUNNING);
   ASSERT(is_thread(next));
 
+  /* 如果调度器运行结果（next）表示需要执行线程切换
+     那么就调用switch_threads执行线程切换
+     注意，此函数执行前后线程的身份是不一样的
+
+     值得注意的是
+   */
   if (cur != next)
-    prev = switch_threads(cur, next);
+    prev = switch_threads(cur, next); 
   thread_switch_tail(prev);
 }
 
