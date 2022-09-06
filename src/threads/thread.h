@@ -131,13 +131,16 @@ extern enum sched_policy active_sched_policy;
 void thread_init(void);
 void thread_start(void);
 
+/* 计时器中断处理程序 */
 void thread_tick(void);
 void thread_print_stats(void);
 
 typedef void thread_func(void* aux);
 tid_t thread_create(const char* name, int priority, thread_func*, void*);
 
+/* 同步原语将线程归入等待队列时调用，当前线程sleep，调用schedule */
 void thread_block(void);
+/* 同步原语将线程移出等待队列时调用，当前线程不会sleep */
 void thread_unblock(struct thread*);
 
 struct thread* thread_current(void);
@@ -145,6 +148,7 @@ tid_t thread_tid(void);
 const char* thread_name(void);
 
 void thread_exit(void) NO_RETURN;
+/* 线程自动让出CPU，当前线程READY，调用schedule */
 void thread_yield(void);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */

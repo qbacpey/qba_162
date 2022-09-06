@@ -243,6 +243,8 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
 
+   同步原语将TCB归入等待队列的时候会使用这个函数
+
    This function must be called with interrupts turned off.  It
    is usually a better idea to use one of the synchronization
    primitives in synch.h. */
@@ -272,16 +274,15 @@ static void thread_enqueue(struct thread* t) {
    This is an error if T is not blocked.  (Use thread_yield() to
    make the running thread ready.)
 
+   一般是某些同步原语弹出优先级队列中TCB的时候会使用这个函数
+   此函数不会调用schedule()，而只会做以下两件事情：
+   1.将t归入等待队列
+   2.将t的状态设置为THREAD_READY
+
    This function does not preempt the running thread.  This can
    be important: if the caller had disabled interrupts itself,
    it may expect that it can atomically unblock a thread and
-   update other data. 
-
-   作用就是将线程从waiting queue从拿出来，放到ready queue中
-   虽然此函数当前实现**仅仅**是粗暴地将其归入ready queue中
-   之前也提到当前系统中的同步原语实现是禁用中断
-   
-   */
+   update other data. */
 void thread_unblock(struct thread* t) {
   enum intr_level old_level;
 
