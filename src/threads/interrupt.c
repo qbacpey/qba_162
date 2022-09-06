@@ -352,6 +352,8 @@ void intr_handler(struct intr_frame* frame) {
     in_external_intr = false;
     pic_end_of_interrupt(frame->vec_no);
 
+    /* 如果是外部中断（计时器中断）设置了yield_on_return旗标
+       代表当前线程让出CPU，需要执行调度算法 */
     if (yield_on_return)
       thread_yield();
   }

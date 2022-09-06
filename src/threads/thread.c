@@ -133,7 +133,16 @@ void thread_start(void) {
 }
 
 /* Called by the timer interrupt handler at each timer tick.
-   Thus, this function runs in an external interrupt context. */
+   Thus, this function runs in an external interrupt context. 
+   
+   每发生一次计时器中断这个中断处理程序就会被调用（此时中断已被禁用）
+   作用是递增内核计时（ticks）供调度器做出正确判断
+   如果递增过后发现是时候需要执行调度器了（thread_ticks >= TIME_SLICE）
+   那么就会调用intr_yield_on_return设置一个旗标（flag）
+
+   intr_handler退出的时候就会检查这个旗标，根据这个旗标中的内容
+   确定是否需要执行调度算法
+    */
 void thread_tick(void) {
   struct thread* t = thread_current();
 
@@ -327,7 +336,9 @@ void thread_exit(void) {
 }
 
 /* Yields the CPU.  The current thread is not put to sleep and
-   may be scheduled again immediately at the scheduler's whim. */
+   may be scheduled again immediately at the scheduler's whim. 
+   1.将当前线程状态设置为THREAD_READY并入列
+   2.禁用中断，执行schedule */
 void thread_yield(void) {
   struct thread* cur = thread_current();
   enum intr_level old_level;
@@ -541,6 +552,10 @@ static struct thread* next_thread_to_run(void) {
 /* Completes a thread switch by activating the new thread's page
    tables, and, if the previous thread is dying, destroying it.
 
+   1.重置计时器
+   2.将当前线程标记为THREAD_RUNNING
+   3.如果当前线程是用户线程，查看是否需要切换内存空间
+
    At this function's invocation, we just switched from thread
    PREV, the new thread is already running, and interrupts are
    still disabled.  This function is normally invoked by
@@ -553,12 +568,7 @@ static struct thread* next_thread_to_run(void) {
    added at the end of the function.
 
    After this function and its caller returns, the thread switch
-   is complete. 
-   * 
-   * 进程退出的时候应该仿照这里的写法释放所有派生的线程
-   * 
-   * 
-   */
+   is complete. */
 void thread_switch_tail(struct thread* prev) {
   struct thread* cur = running_thread();
 
@@ -602,8 +612,8 @@ void thread_switch_tail(struct thread* prev) {
    kernel_thread: 调用线程启动函数
 
    线程非初次调度时的执行序列：
-   schedule: 调度器，在合适的时候执行switch_threads
-   switch_threads: 保存旧线程状态，加载新线程状态
+   schedule: 调度器，执行调度算法，需要时执行switch_threads
+   switch_threads: 保存旧线程状态，加载新线程状态（切换线程）
    thread_switch_tail: 清除旧线程，完成线程切换
    
    */
@@ -620,10 +630,7 @@ static void schedule(void) {
 
   /* 如果调度器运行结果（next）表示需要执行线程切换
      那么就调用switch_threads执行线程切换
-     注意，此函数执行前后线程的身份是不一样的
-
-     值得注意的是
-   */
+     注意，switch_threads执行前后线程的身份是不一样的 */
   if (cur != next)
     prev = switch_threads(cur, next); 
   thread_switch_tail(prev);
