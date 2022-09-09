@@ -3,15 +3,18 @@
 
 #include <stdbool.h>
 #include <debug.h>
-#include <pthread.h>
+#include "pthread.h"
 
 /* Process identifier. */
 typedef int pid_t;
 #define PID_ERROR ((pid_t)-1)
 
+#ifndef USER_SYNC_TYPE
+#define USER_SYNC_TYPE
 /* Synchronization Types */
 typedef char lock_t;
 typedef char sema_t;
+#endif
 
 /* Map region identifier. */
 typedef int mapid_t;

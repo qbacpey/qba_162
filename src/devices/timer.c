@@ -61,7 +61,7 @@ void timer_calibrate(void) {
   printf("%'" PRIu64 " loops/s.\n", (uint64_t)loops_per_tick * TIMER_FREQ);
 }
 
-/* Returns the number of timer ticks since the OS booted. */
+/* Returns the number of timer ticks since the OS booted.（具有原子性） */
 int64_t timer_ticks(void) {
   enum intr_level old_level = intr_disable();
   int64_t t = ticks;

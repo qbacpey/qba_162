@@ -322,7 +322,10 @@ struct thread* thread_current(void) {
 tid_t thread_tid(void) { return thread_current()->tid; }
 
 /* Deschedules the current thread and destroys it.  Never
-   returns to the caller. */
+   returns to the caller.
+   
+   1.将当前线程的TCB从allelem中移除
+   2.将当前线程TCB标记为THREAD_DYING */
 void thread_exit(void) {
   ASSERT(!intr_context());
 

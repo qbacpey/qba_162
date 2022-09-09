@@ -76,8 +76,10 @@ void exit(int status) {
   NOT_REACHED();
 }
 
+/* 无论父进程有多少个线程，子线程必然只有一个主线程 */
 pid_t exec(const char* file) { return (pid_t)syscall1(SYS_EXEC, file); }
 
+/* 如果子线程对指定进程执行wait，只有该线程会被暂停 */
 int wait(pid_t pid) { return syscall1(SYS_WAIT, pid); }
 
 bool create(const char* file, unsigned initial_size) {
@@ -122,21 +124,52 @@ tid_t sys_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg) {
   return syscall3(SYS_PT_CREATE, sfun, tfun, arg);
 }
 
+/* 如果主线程执行此函数，那么主线程需要join所有活跃线程之后再退出 */
 void sys_pthread_exit() {
   syscall0(SYS_PT_EXIT);
   NOT_REACHED();
 }
 
+/** 阻塞直到指定线程执行完毕之后再继续执行，同步相关的要求如下：
+ * 1.仅可以join位于同一进程的线程，且这个线程尚未被join过
+ * 2.可以join一个已经结束的线程
+ * 3.任何线程可以join同进程的任何其他线程，如果主线程被join了
+ *   那么在主线程执行thread_exit之后，在进程退出之前
+ *   该线程会被唤醒（thread_unblock）
+ * */ 
 tid_t sys_pthread_join(tid_t tid) { return syscall1(SYS_PT_JOIN, tid); }
 
+/**
+ * @brief 将锁注册到内核空间
+ * 
+ * @param lock 指向用户空间的lock_t的指针
+ * @return true 
+ * @return false 
+ */
 bool lock_init(lock_t* lock) { return syscall1(SYS_LOCK_INIT, lock); }
 
+/**
+ * @brief 获取锁，如果需要的话阻塞
+ * 
+ * 获取锁成功时返回true
+ * 如果锁尚未被注册到内核中或者当前线程已经获取该锁时返回false
+ * 
+ * @param lock 指向用户空间的lock_t的指针
+ */
 void lock_acquire(lock_t* lock) {
   bool success = syscall1(SYS_LOCK_ACQUIRE, lock);
   if (!success)
     exit(1);
 }
 
+/**
+ * @brief 释放锁
+ * 
+ * 释放锁成功时返回true
+ * 如果锁尚未被注册到内核中或者当前线程未持有该锁时返回false
+ * 
+ * @param lock 指向用户空间的lock_t的指针
+ */
 void lock_release(lock_t* lock) {
   bool success = syscall1(SYS_LOCK_RELEASE, lock);
   if (!success)
