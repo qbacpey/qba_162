@@ -615,10 +615,18 @@ void thread_switch_tail(struct thread* prev) {
    thread_switch_tail: 清除旧线程
    kernel_thread: 调用线程启动函数
 
-   线程非初次调度时的执行序列：
-   schedule: 调度器，执行调度算法，需要时执行switch_threads
-   switch_threads: 保存旧线程状态，加载新线程状态（切换线程）
-   thread_switch_tail: 清除旧线程，完成线程切换
+   线程非初次调度时的执行序列（计时器中断）：
+   intr_stub: 硬件调用，保存状态
+   intr_handler: 检测到是外部中断，禁用中断
+      timer_interrupt: 递增 Number of timer ticks since OS booted
+      thread_tick: 递增此线程tick
+      intr_yield_on_return: 设置flag
+   intr_handler: 检测到flag==true，退出外部中断上下文，执行thread_yield
+      thread_yield: 禁用中断
+          schedule: 调度器，执行调度算法，需要时执行switch_threads
+              switch_threads: 保存旧线程状态，加载新线程状态（切换线程）
+              thread_switch_tail: 清除旧线程，完成线程切换
+      thread_yield: 启用中断
    
    */
 static void schedule(void) {
