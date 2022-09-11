@@ -19,23 +19,31 @@ enum intr_level intr_set_level(enum intr_level);
 enum intr_level intr_enable(void);
 enum intr_level intr_disable(void);
 
+/* 禁用中断环境下执行action */
+#define DISABLE_INTR(action)                                                                       \
+  do {                                                                                             \
+    enum intr_level old_level = intr_disable();                                                    \
+    { action; }                                                                                    \
+    intr_set_level(old_level);                                                                     \
+  } while (0)
+
 /* Interrupt stack frame. */
 struct intr_frame {
   /* Pushed by intr_entry in intr-stubs.S.
        These are the interrupted task's saved registers. */
-  uint32_t edi;       /* Saved EDI. */
-  uint32_t esi;       /* Saved ESI. */
-  uint32_t ebp;       /* Saved EBP. */
-  uint32_t esp_dummy; /* Not used. */
-  uint32_t ebx;       /* Saved EBX. */
-  uint32_t edx;       /* Saved EDX. */
-  uint32_t ecx;       /* Saved ECX. */
-  uint32_t eax;       /* Saved EAX. */
+  uint32_t edi;                /* Saved EDI. */
+  uint32_t esi;                /* Saved ESI. */
+  uint32_t ebp;                /* Saved EBP. */
+  uint32_t esp_dummy;          /* Not used. */
+  uint32_t ebx;                /* Saved EBX. */
+  uint32_t edx;                /* Saved EDX. */
+  uint32_t ecx;                /* Saved ECX. */
+  uint32_t eax;                /* Saved EAX. */
   uint8_t fpu_state[FPU_SIZE]; /* FPU的所有状态 使用fsave和frstore维护 */
-  uint16_t gs, : 16;  /* Saved GS segment register. */
-  uint16_t fs, : 16;  /* Saved FS segment register. */
-  uint16_t es, : 16;  /* Saved ES segment register. */
-  uint16_t ds, : 16;  /* Saved DS segment register. */
+  uint16_t gs, : 16;           /* Saved GS segment register. */
+  uint16_t fs, : 16;           /* Saved FS segment register. */
+  uint16_t es, : 16;           /* Saved ES segment register. */
+  uint16_t ds, : 16;           /* Saved DS segment register. */
 
   /* Pushed by intrNN_stub in intr-stubs.S. */
   uint32_t vec_no; /* Interrupt vector number. */

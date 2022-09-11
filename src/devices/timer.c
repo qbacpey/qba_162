@@ -94,6 +94,19 @@ void timer_sleep(int64_t ticks) {
   int64_t start = timer_ticks();
 
   ASSERT(intr_get_level() == INTR_ON);
+
+  struct timer_sleep_thread *t = NULL;
+  malloc_type(t);
+  ASSERT(t != NULL);
+  t->start = start;
+  t->ticks = ticks;
+  t->thread = thread_current();
+
+  DISABLE_INTR(
+    {
+;
+    }
+  );
   while (timer_elapsed(start) < ticks)
     thread_yield();
 }

@@ -9,12 +9,7 @@
 // These defines will be used in Project 2: Multithreading
 #define MAX_STACK_PAGES (1 << 11)
 #define MAX_THREADS 127
-/**
- * @brief 使用malloc
- * 为PTR指针分配typeof(PRY)大小的一块内存
- * 
- */
-#define malloc_type(PTR) PTR = (typeof (*PTR)(*))malloc(sizeof(typeof(*PTR)))
+
 
 /* PIDs and TIDs are the same type. PID should be
    the TID of the main thread of the process */
