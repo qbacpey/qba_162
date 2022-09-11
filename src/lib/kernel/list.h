@@ -192,9 +192,30 @@ bool list_empty(struct list*);
 /* Miscellaneous. */
 void list_reverse(struct list*);
 
-/* Compares the value of two list elements A and B, given
-   auxiliary data AUX.  Returns true if A is less than B, or
-   false if A is greater than or equal to B. */
+/**
+  * Compares the value of two list elements A and B, given
+  * auxiliary data AUX.  Returns true if A is less than B, or
+  * false if A is greater than or equal to B. 
+  * 
+  * 比较列表元素a和b：
+  * 如果a应该放在b的前面，那么返回true
+  * 如果a应该放在b的后面，那么返回false
+  * 具体行为将a和b解包成链表外包装，然后使用aux比较它们
+  * 
+  * aux则最好不要这样理解，aux是实际接收并比较列表外包装的函数
+  * 如果a比b小，那么返回true
+  * 如果a比b大，那么返回true
+  * 
+  * 总的来说，list_less_func的语义偏向于a和b位置关系
+  * aux的语义偏向于a和b的大小关系，是真正比较a和b需要使用的函数
+  * 
+  * 举例来说，如果需要使用这套系统维护线程优先级列表
+  * 并且这个列表满足不变性：优先级最大的在最前面、新元素需要插到同等优先级元素的最后
+  * 那么就可以将list_less_func类型的函数命名为：list_name_before
+  * 将aux命名为：grater_equal_pri
+  * 而如果是插到同等元素的最前面，那么可以将aux命名为：grater_pri
+  * 
+  */
 typedef bool list_less_func(const struct list_elem* a, const struct list_elem* b, void* aux);
 
 /* Operations on lists with ordered elements. */

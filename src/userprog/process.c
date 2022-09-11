@@ -552,32 +552,30 @@ void process_exit(int exit_code) {
 
   /* 释放文件描述符表，必须使用 NULL 进行初始化 */
   struct file_desc* file_pos = NULL;
-  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem,
-                  {
-                    file_close(file_pos->file);
-                    free(file_pos);
-                  });
+  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem, {
+    file_close(file_pos->file);
+    free(file_pos);
+  });
 
-      /* 释放子进程表 */
-      struct child_process* child = NULL;
+  /* 释放子进程表 */
+  struct child_process* child = NULL;
   struct semaphore* child_editing = NULL;
-  list_clean_each(child, &(pcb_to_free->children), elem,
-                  {
-                    // 这里的信号量实际上相当于引用计数，false=2，true=1
-                    if (sema_try_down(&(child->waiting))) {
-                      // 子进程已经退出，直接释放即可
-                      free_child_self(child);
-                    } else {
-                      // 子进程未退出，需要获取editing，再进一步进行操作
-                      child_editing = child->editing;
-                      sema_down(child_editing);
-                      free_child_self(child);
-                      sema_up(child_editing);
-                    }
-                  });
+  list_clean_each(child, &(pcb_to_free->children), elem, {
+    // 这里的信号量实际上相当于引用计数，false=2，true=1
+    if (sema_try_down(&(child->waiting))) {
+      // 子进程已经退出，直接释放即可
+      free_child_self(child);
+    } else {
+      // 子进程未退出，需要获取editing，再进一步进行操作
+      child_editing = child->editing;
+      sema_down(child_editing);
+      free_child_self(child);
+      sema_up(child_editing);
+    }
+  });
 
-      /* 资源全部释放 */
-      cur->pcb = NULL;
+  /* 资源全部释放 */
+  cur->pcb = NULL;
   free(pcb_to_free);
 
   // sema_up(&temporary);
