@@ -128,10 +128,18 @@ struct list {
 * @pos:        the type * to use as a loop counter. 
 * @list:       the pointer of list. 
 * @member:     the name of the list_struct within the struct. 
+* @action:     需要对列表中每一个元素执行的清理相关的工作
  */
-#define list_clean_each(pos, list, member)                                                         \
-  for (pos = !list_empty(list) ? list_entry(list_pop_front(list), typeof(*pos), member) : NULL;    \
-       !list_empty(list); pos = list_entry(list_pop_front(list), typeof(*pos), member))
+#define list_clean_each(pos, list, member, action)                                                 \
+  do {                                                                                             \
+    for (pos = !list_empty(list) ? list_entry(list_pop_front(list), typeof(*pos), member) : NULL;  \
+         !list_empty(list); pos = list_entry(list_pop_front(list), typeof(*pos), member)) {        \
+      action;                                                                                      \
+    }                                                                                              \
+    if (pos != NULL) {                                                                             \
+      action;                                                                                      \
+    }                                                                                              \
+  } while (0) // 尾部的if语句是必要的
 
 /* List initialization.
 

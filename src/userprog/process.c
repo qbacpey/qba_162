@@ -183,8 +183,6 @@ pid_t process_execute(const char* file_name) {
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
   child_elem->pid = tid;
 
-
-
 done:
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
@@ -447,7 +445,7 @@ int process_wait(pid_t child_pid) {
   int result = -1;
   struct thread* tcb = thread_current();
 
-  // 子线程的id和父进程的id之间没有固定的关系 
+  // 子线程的id和父进程的id之间没有固定的关系
   // 因此下面这些代码被注释掉了，用来引以为戒
   // if (child_pid <= tcb->tid) {
   //   return result;
@@ -554,48 +552,32 @@ void process_exit(int exit_code) {
 
   /* 释放文件描述符表，必须使用 NULL 进行初始化 */
   struct file_desc* file_pos = NULL;
-  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem) {
-    file_close(file_pos->file);
-    free(file_pos);
-  }
-  // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
-  if (file_pos != NULL) {
-    file_close(file_pos->file);
-    free(file_pos);
-  }
+  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem,
+                  {
+                    file_close(file_pos->file);
+                    free(file_pos);
+                  });
 
-  /* 释放子进程表 */
-  struct child_process* child = NULL;
+      /* 释放子进程表 */
+      struct child_process* child = NULL;
   struct semaphore* child_editing = NULL;
-  list_clean_each(child, &(pcb_to_free->children), elem) {
-    // 这里的信号量实际上相当于引用计数，false=2，true=1
-    if (sema_try_down(&(child->waiting))) {
-      // 子进程已经退出，直接释放即可
-      free_child_self(child);
-    } else {
-      // 子进程未退出，需要获取editing，再进一步进行操作
-      child_editing = child->editing;
-      sema_down(child_editing);
-      free_child_self(child);
-      sema_up(child_editing);
-    }
-  }  
-  // 尾部的if语句是必要的
-  if (child != NULL) {
-    if (sema_try_down(&(child->waiting))) {
-      // 子进程已经退出
-      free_child_self(child);
-    } else {
-      // 子进程未退出，需要获取editing
-      child_editing = child->editing;
-      sema_down(child_editing);
-      free_child_self(child);
-      sema_up(child_editing);
-    }
-  }
+  list_clean_each(child, &(pcb_to_free->children), elem,
+                  {
+                    // 这里的信号量实际上相当于引用计数，false=2，true=1
+                    if (sema_try_down(&(child->waiting))) {
+                      // 子进程已经退出，直接释放即可
+                      free_child_self(child);
+                    } else {
+                      // 子进程未退出，需要获取editing，再进一步进行操作
+                      child_editing = child->editing;
+                      sema_down(child_editing);
+                      free_child_self(child);
+                      sema_up(child_editing);
+                    }
+                  });
 
-  /* 资源全部释放 */
-  cur->pcb = NULL;
+      /* 资源全部释放 */
+      cur->pcb = NULL;
   free(pcb_to_free);
 
   // sema_up(&temporary);
