@@ -7,6 +7,13 @@
 /* Number of timer interrupts per second. */
 #define TIMER_FREQ 100
 
+struct timer_sleep_thread {
+    int64_t start; // 调用timer_sleep时的tick
+    int64_t ticks; // 想要等多少个tick
+    struct thread *thread; // TCB
+    struct list_elem elem; // timer_sleep_list的入列元素
+};
+
 void timer_init(void);
 void timer_calibrate(void);
 

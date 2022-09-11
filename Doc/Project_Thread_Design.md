@@ -71,6 +71,12 @@ static struct list timer_sleep_list;
 
 # Strict Priority Scheduler
 
+> **Strict Priority**
+> 
+> A strict priority scheduler schedules the task with the highest priority. If multiple tasks have the same priority, they can be scheduled in some RR fashion. 
+> This ensures that important tasks get to run ﬁrst but doesn’t maintain fairness. Evidently, a strict priority scheduler suﬀers from starvation for lower priority threads.
+> 
+
 TODO: 
 
 - 替换Ready Queue实现；

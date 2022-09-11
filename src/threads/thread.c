@@ -247,7 +247,14 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
 
    This function must be called with interrupts turned off.  It
    is usually a better idea to use one of the synchronization
-   primitives in synch.h. */
+   primitives in synch.h. 
+   
+   之所以不会被再次调度，是由于调度器每次调度的时候都会将列表中的第一个线程
+   pop出来，schedule又不会将此线程加入等待队列，因此只需要将此线程的状态设置为
+   THREAD_BLOCK。而只有等到下一次使用thread_unblock将TCB加回到等待队列之后
+   执行thread_block的线程才会被再次调度执行
+
+   */
 void thread_block(void) {
   ASSERT(!intr_context());
   ASSERT(intr_get_level() == INTR_OFF);
@@ -515,7 +522,17 @@ static void* alloc_frame(struct thread* t, size_t size) {
   return t->stack;
 }
 
-/* First-in first-out scheduler */
+/** 
+ * First-in first-out scheduler 
+ * 
+ * 这里简单说明一下FIFO调度器的行为
+ * 每此执行此函数，Ready Queue中的第一个线程就会被弹出
+ * 随后schedule就会将此线程调度执行
+ * 问题来了，之前的线程如果没有执行完毕，那么如果不将它压回到Ready Queue
+ * 那么它岂不是永远不会被再次调度运行？
+ * 实际上，对于硬件中断来说，计时器中断调用的对象是thread_yield
+ * 而thread_yield会在执行schedule之前将TCB放回到等待队列的末尾
+ * */
 static struct thread* thread_schedule_fifo(void) {
   if (!list_empty(&fifo_ready_list))
     return list_entry(list_pop_front(&fifo_ready_list), struct thread, elem);

@@ -20,6 +20,9 @@
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
 
+/* 因执行timer_sleep而BLOCK的线程列表，是一个优先级队列，优先级是ticks */
+static struct list timer_sleep_list;
+
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
@@ -35,6 +38,7 @@ static void real_time_delay(int64_t num, int32_t denom);
 void timer_init(void) {
   pit_configure_channel(0, 2, TIMER_FREQ);
   intr_register_ext(0x20, timer_interrupt, "8254 Timer");
+  list_init(&timer_sleep_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
