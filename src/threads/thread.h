@@ -23,6 +23,11 @@ enum thread_status {
   THREAD_DYING    /* About to be destroyed. */
 };
 
+struct donated_his {
+  int8_t old_pri; // 受赠之前的优先级
+  struct list_elem elem;
+};
+
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
 typedef int tid_t;
@@ -117,6 +122,7 @@ struct thread {
   /* Strict Priority Scheduler相关 */
   struct rw_lock lock;      // 修改TCB之前需要获取此锁
   struct thread* donee;     // 线程优先级的捐献对象
+  struct list donated_his_tab;  // 线程受优先级捐献之前的优先级
   struct lock* donated_for; // 线程因为哪一个锁诱发优先级捐献？
   int8_t b_pri;            // 线程的基本优先级.
   int8_t e_pri;            // 线程的实际优先级

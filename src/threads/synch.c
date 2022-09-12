@@ -31,6 +31,7 @@
 #include <string.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/malloc.h"
 
 static void donate_pri_acquire(struct thread* self, struct thread* holder);
 static bool donate_pri_release(struct thread* self);
@@ -62,13 +63,14 @@ void sema_down(struct semaphore* sema) {
   ASSERT(sema != NULL);
   ASSERT(!intr_context());
 
-  DISABLE_INTR({
-    while (sema->value == 0) {
-      list_insert_ordered(&sema->waiters, &thread_current()->elem, &thread_before, &grater_pri);
-      thread_block();
-    }
-    sema->value--;
-  });
+  enum intr_level old_level = intr_disable();
+  list_sort(&sema->waiters, &thread_before, &grater_pri);
+  while (sema->value == 0) {
+    list_insert_ordered(&sema->waiters, &thread_current()->elem, &thread_before, &grater_pri);
+    thread_block();
+  }
+  sema->value--;
+  intr_set_level(old_level);
 }
 
 /* Down or "P" operation on a semaphore, but only if the
@@ -80,15 +82,13 @@ bool sema_try_down(struct semaphore* sema) {
   bool success;
 
   ASSERT(sema != NULL);
-
-  DISABLE_INTR({
-    if (sema->value > 0) {
-      sema->value--;
-      success = true;
-    } else
-      success = false;
-  });
-
+  enum intr_level old_level = intr_disable();
+  if (sema->value > 0) {
+    sema->value--;
+    success = true;
+  } else
+    success = false;
+  intr_set_level(old_level);
   return success;
 }
 
@@ -99,11 +99,19 @@ bool sema_try_down(struct semaphore* sema) {
 void sema_up(struct semaphore* sema) {
   ASSERT(sema != NULL);
 
+  struct thread* t = NULL;
   DISABLE_INTR({
-    if (!list_empty(&sema->waiters))
-      thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+    if (!list_empty(&sema->waiters)) {
+      // 可能发生了优先级捐献，需要重整一下
+      list_sort(&sema->waiters, &thread_before, &grater_pri);
+      t = list_entry(list_pop_front(&sema->waiters), struct thread, elem);
+      thread_unblock(t);
+    }
     sema->value++;
   });
+
+  if (t != NULL && !intr_context() && t->e_pri > thread_get_priority())
+    thread_yield();
 }
 
 static void sema_test_helper(void* sema_);
@@ -173,9 +181,8 @@ void lock_acquire(struct lock* lock) {
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
   struct thread* t = thread_current();
-
+  
   enum intr_level old_level = intr_disable();
-
   if (--lock->state < 0) {
     t->donee = lock->holder;
     donate_pri_acquire(t, lock->holder);
@@ -183,10 +190,8 @@ void lock_acquire(struct lock* lock) {
   } else {
     lock->semaphore.value = 0;
   }
-
-  intr_set_level(old_level);
-
   t->donee = NULL;
+  intr_set_level(old_level);
   lock->holder = t;
 }
 
@@ -219,17 +224,23 @@ void lock_release(struct lock* lock) {
 
   struct thread* t = thread_current();
   bool flag = false;
+  struct donated_his* h = NULL;
 
-  enum intr_level old_level = intr_disable();
-  if (++lock->state < 1) {
-    flag = donate_pri_release(t);
-    sema_up(&lock->semaphore);
-  } else {
-    lock->semaphore.value = 1;
-  }
-  lock->holder = NULL;
-  intr_set_level(old_level);
-
+  DISABLE_INTR({
+    if (++lock->state < 1) {
+      sema_up(&lock->semaphore);
+    } else {
+      lock->semaphore.value = 1;
+    }
+    lock->holder = NULL;
+    if (!list_empty(&(t->donated_his_tab))) {
+      h = list_entry(list_pop_front(&(t->donated_his_tab)), struct donated_his, elem);
+      t->e_pri = h->old_pri;
+      flag = true;
+    } 
+  });
+  if(h != NULL)
+    free(h);
   if (flag)
     thread_yield();
 }
@@ -302,10 +313,10 @@ void rw_lock_release(struct rw_lock* rw_lock, bool reader) {
 }
 
 /* One semaphore in a list. */
-struct semaphore_elem {
-  struct list_elem elem;      /* List element. */
-  struct semaphore semaphore; /* This semaphore. */
-};
+// struct semaphore_elem {
+//   struct list_elem elem;      /* List element. */
+//   struct semaphore semaphore; /* This semaphore. */
+// };
 
 /* Initializes condition variable COND.  A condition variable
    allows one piece of code to signal a condition and cooperating
@@ -337,17 +348,15 @@ void cond_init(struct condition* cond) {
    interrupts disabled, but interrupts will be turned back on if
    we need to sleep. */
 void cond_wait(struct condition* cond, struct lock* lock) {
-  struct semaphore_elem waiter;
-
   ASSERT(cond != NULL);
   ASSERT(lock != NULL);
   ASSERT(!intr_context());
   ASSERT(lock_held_by_current_thread(lock));
 
-  sema_init(&waiter.semaphore, 0);
-  list_push_back(&cond->waiters, &waiter.elem);
+  list_insert_ordered(&cond->waiters, &thread_current()->elem, &thread_before, &grater_pri);
   lock_release(lock);
-  sema_down(&waiter.semaphore);
+  DISABLE_INTR({ thread_block(); });
+
   lock_acquire(lock);
 }
 
@@ -363,9 +372,14 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
   ASSERT(lock != NULL);
   ASSERT(!intr_context());
   ASSERT(lock_held_by_current_thread(lock));
-
-  if (!list_empty(&cond->waiters))
-    sema_up(&list_entry(list_pop_front(&cond->waiters), struct semaphore_elem, elem)->semaphore);
+  struct thread* t = NULL;
+  if (!list_empty(&cond->waiters)) {
+    list_sort(&cond->waiters, &thread_before, &grater_pri);
+    t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
+    thread_unblock(t);
+  }
+  if (t != NULL && !intr_context() && t->e_pri > thread_get_priority())
+    thread_yield();
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -377,18 +391,44 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
 void cond_broadcast(struct condition* cond, struct lock* lock) {
   ASSERT(cond != NULL);
   ASSERT(lock != NULL);
-
-  while (!list_empty(&cond->waiters))
-    cond_signal(cond, lock);
+  struct thread* t = NULL;
+  bool flag = false;
+  while (!list_empty(&cond->waiters)) {
+    list_sort(&cond->waiters, &thread_before, &grater_pri);
+    t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
+    thread_unblock(t);
+    if (t->e_pri > thread_get_priority()) {
+      flag = true;
+    }
+  }
+  if (t != NULL && flag)
+    thread_yield();
 }
 
-/* 执行优先级捐献逻辑，执行时需要禁用中断 */
+/* 执行优先级捐献逻辑，执行时需要禁用中断
+    值得一提的是，此实现有一个缺陷
+    如果某低优先级线程先后获取了两个高优先级线程所需资源
+    并且靠后线程的优先级更高的话，
+    此线程不能恢复到第一个高优先级捐给他的实际优先级
+    而是会在释放第二个线程资源的时候让实际优先级恢复到b_pri
+
+    解决方法就是让执行优先级捐献的线程捐献优先级的时候
+    记住捐献链末尾线程的实际优先级
+    获取锁的时候用这个优先级将他恢复
+ */
 static void donate_pri_acquire(struct thread* self, struct thread* holder) {
   ASSERT(holder != NULL);
   ASSERT(self != NULL);
+  int8_t old_pri = holder->e_pri;
   while (holder != NULL) {
     if (self->e_pri <= holder->e_pri)
       break;
+    // 保存捐献历史到对应TCB中
+    struct donated_his *his = NULL; 
+    malloc_type(his);
+    his->old_pri = holder->e_pri;
+    list_push_front(&(holder->donated_his_tab), &(his->elem));
+
     holder->e_pri = self->e_pri;
     holder = holder->donee;
   }

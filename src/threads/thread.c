@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -349,6 +350,10 @@ void thread_exit(void) {
      when it calls thread_switch_tail(). */
   intr_disable();
   list_remove(&thread_current()->allelem);
+  struct donated_his* his_pos = NULL;
+  list_clean_each(his_pos, &(thread_current()->donated_his_tab), elem, {
+    free(his_pos);
+  });
   thread_current()->status = THREAD_DYING;
   schedule();
   NOT_REACHED();
@@ -387,13 +392,20 @@ void thread_foreach(thread_action_func* func, void* aux) {
 
 /* Sets the current thread's priority to NEW_PRIORITY.（注意，设置的是Base Pri） */
 void thread_set_priority(int new_priority) {
+  bool flag = false;
   DISABLE_INTR({
     struct thread* t = thread_current();
     if (t->b_pri == t->e_pri) {
+      // 只有实际优先级和基本优先级相等的时候才设置实际优先级
       t->e_pri = new_priority;
+      // 当前线程优先级减小
+      flag = t->b_pri > new_priority;
     }
     t->b_pri = new_priority;
   });
+
+  if (flag)
+    thread_yield();
 }
 
 /* Returns the current thread's priority. */
@@ -518,6 +530,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->donated_for = NULL;
   t->b_pri = priority;
   t->e_pri = priority;
+  list_init(&t->donated_his_tab);
 
   /* 
    * 对all_list的操作需要 禁用中断
