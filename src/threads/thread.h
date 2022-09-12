@@ -105,7 +105,9 @@ struct thread {
   int priority;              /* Priority. */
   struct list_elem allelem;  /* List element for all threads list. */
 
-  /* Shared between thread.c and synch.c. */
+  int64_t wake_up; // 需要在什么时候醒来
+
+  /* Shared between thread.c / synch.c. / timer.c */
   struct list_elem elem; /* List element. */
 
 // 这里好像可以定义 PCB

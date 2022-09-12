@@ -192,7 +192,10 @@ void* realloc(void* old_block, size_t new_size) {
 }
 
 /* Frees block P, which must have been previously allocated with
-   malloc(), calloc(), or realloc(). */
+   malloc(), calloc(), or realloc(). 
+
+    不可以在中断环境下调用此函数
+   */
 void free(void* p) {
   if (p != NULL) {
     struct block* b = p;

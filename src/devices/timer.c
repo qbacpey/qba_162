@@ -7,6 +7,14 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include "threads/malloc.h"
+
+/**
+ * @brief PTR是一个指针
+ * 使用malloc为PTR指针分配typeof(PRY)大小的一块内存
+ * 
+ */
+#define malloc_type(PTR) PTR = (typeof (*PTR)(*))malloc(sizeof(typeof(*PTR)))
 
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -32,6 +40,9 @@ static bool too_many_loops(unsigned loops);
 static void busy_wait(int64_t loops);
 static void real_time_sleep(int64_t num, int32_t denom);
 static void real_time_delay(int64_t num, int32_t denom);
+static bool wake_up_before(const struct list_elem* elem_a, const struct list_elem* elem_b,
+                           void* aux);
+static bool less_sleep(struct thread* sleeping_a, struct thread* sleeping_b);
 
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
@@ -95,20 +106,13 @@ void timer_sleep(int64_t ticks) {
 
   ASSERT(intr_get_level() == INTR_ON);
 
-  struct timer_sleep_thread *t = NULL;
-  malloc_type(t);
-  ASSERT(t != NULL);
-  t->start = start;
-  t->ticks = ticks;
-  t->thread = thread_current();
+  struct thread* t = thread_current();
+  t->wake_up = start + ticks;
 
-  DISABLE_INTR(
-    {
-;
-    }
-  );
-  while (timer_elapsed(start) < ticks)
-    thread_yield();
+  DISABLE_INTR({
+    list_insert_ordered(&timer_sleep_list, &(t->elem), &wake_up_before, &less_sleep);
+    thread_block();
+  });
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -156,6 +160,19 @@ void timer_print_stats(void) { printf("Timer: %" PRId64 " ticks\n", timer_ticks(
 /* Timer interrupt handler. */
 static void timer_interrupt(struct intr_frame* args UNUSED) {
   ticks++;
+  /* 检查是否有需要唤醒的线程 */
+  struct thread* curr = NULL;
+  struct thread* next = list_entry(list_begin(&timer_sleep_list), struct thread, elem);
+  while (!list_empty(&timer_sleep_list)) {
+    curr = next;
+    next = list_entry(next->elem.next, struct thread, elem);
+    if (curr->wake_up <= timer_ticks()) {
+      list_pop_front(&timer_sleep_list);
+      thread_unblock(curr);
+    } else {
+      break;
+    }
+  }
   thread_tick();
 }
 
@@ -217,4 +234,16 @@ static void real_time_delay(int64_t num, int32_t denom) {
      the possibility of overflow. */
   ASSERT(denom % 1000 == 0);
   busy_wait(loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000));
+}
+
+static bool wake_up_before(const struct list_elem* elem_a, const struct list_elem* elem_b,
+                           void* aux) {
+  bool (*less)(struct thread*, struct thread*) = aux;
+  struct thread* sleeping_a = list_entry(elem_a, struct thread, elem);
+  struct thread* sleeping_b = list_entry(elem_b, struct thread, elem);
+  return less(sleeping_a, sleeping_b);
+}
+
+static bool less_sleep(struct thread* sleeping_a, struct thread* sleeping_b) {
+  return sleeping_a->wake_up <= sleeping_b->wake_up;
 }

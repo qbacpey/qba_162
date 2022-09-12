@@ -109,6 +109,7 @@ struct list {
 /** 
 * list_for_each_entry  -       iterate over list of given type 
 * 注意，word_count里边的elem是一个结构体，而不是一个指向list_elem的指针
+* 同时，整个操作过程中不可移除其中元素
 * TODO 这里有个问题，pos是会将尾哨兵当成链表元素的
 * @pos:        the type * to use as a loop counter. 
 * @list:       the pointer of list. 

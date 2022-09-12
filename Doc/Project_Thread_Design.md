@@ -24,11 +24,8 @@ TODO:
 #### time.h
 
 ~~~c
-struct timer_sleep_thread {
-    int64_t start; // 调用timer_sleep时的tick
-    int64_t ticks; // 想要等多少个tick
-    struct thread *thread; // TCB
-    struct list_elem elem; // timer_sleep_list的入列元素
+struct thread {
+  int64_t wake_up; // 线程需要在什么时候醒来
 }
 ~~~
 
@@ -49,17 +46,20 @@ static struct list timer_sleep_list;
 
 这个函数需要在其原有的实现上做出如下改进：
 
-1. 利用`timer_ticks`的返回值初始化`struct timer_sleep_thread`；
+1. 利用`timer_ticks`返回值和参数`ticks`设置TCB中的`wake_up`；
 2. 禁用中断时执行以下两件事：
-   1. 将当前线程TCB移入`timer_sleep_list`；
-   2. 将当前线程TCB移出Ready Queue；
-3. 启用中断，执行`thread_yield`；
+   1. 使用`list_insert_ordered`将TCB移入`timer_sleep_list`；
+   2. 使用`thread_block`将TCB移出Ready Queue；
 
-### thread_tick
+### timer_interrupt
 
-作为计时器中断处理程序，此函数执行过程中中断被禁用，需要在原有实现上增加一些东西：检查`timer_sleep_list`，是否有需要移动到Ready Queue中的线程（仿照`timer_sleep`中的逻辑进行设计）
+`timer_interrupt`作为计时器中断处理程序，执行全程自动禁用中断
 
-这样每次触发计时器中断的时候都需要检查`timer_sleep_list`，决定要不要唤醒线程
+需要在原有实现上增加一些东西：检查`timer_sleep_list`，是否有需要移动到Ready Queue中的线程（仿照`timer_sleep`中的逻辑进行设计）
+
+每次触发计时器中断的时候都需要检查`timer_sleep_list`，决定要不要唤醒线程（使用`thread_unblock`将线程移动到等待队列）
+
+注意，由于将线程在列表中移动会修改结构体`elem`中的各种字段，因此如果需要将TCB从`timer_sleep_list`移动到Ready Queue中的话，需要先执行`list_pop_front`再执行`thread_unblock`
 
 ## Synchronization
 
