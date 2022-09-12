@@ -105,13 +105,13 @@ struct thread {
   struct list_elem allelem;  /* List element for all threads list. */
 
   int64_t wake_up; // 需要在什么时候醒来
-  
+
   /* Strict Priority Scheduler相关 */
   struct rw_lock lock;      // 修改TCB之前需要获取此锁
   struct thread* donee;     // 线程优先级的捐献对象
   struct lock* donated_for; // 线程因为哪一个锁诱发优先级捐献？
-  uint8_t b_pri;            // 线程的基本优先级.
-  uint8_t e_pri;            // 线程的实际优先级
+  int8_t b_pri;            // 线程的基本优先级.
+  int8_t e_pri;            // 线程的实际优先级
 
 
   /* Shared between thread.c / synch.c. / timer.c */
@@ -178,5 +178,8 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
+
+bool thread_before(const struct list_elem*, const struct list_elem*, void* aux);
+bool grater_pri(struct thread*, struct thread*);
 
 #endif /* threads/thread.h */

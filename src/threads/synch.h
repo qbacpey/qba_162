@@ -23,7 +23,7 @@ void sema_self_test(void);
     */
 struct lock {
   struct thread* holder;      /* Thread holding lock (for debugging). */
-  uint8_t state;              // 当前锁的状态，3种状态仿照Linux2中内核锁实现
+  int8_t state;              // 当前锁的状态，3种状态仿照Linux2中内核锁实现
   struct semaphore semaphore; /* Binary semaphore controlling access. */
 };
 void lock_init(struct lock*);

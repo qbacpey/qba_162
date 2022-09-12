@@ -32,6 +32,9 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static void donate_pri_acquire(struct thread* self, struct thread* holder);
+static bool donate_pri_release(struct thread* self);
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -56,18 +59,16 @@ void sema_init(struct semaphore* sema, unsigned value) {
    interrupts disabled, but if it sleeps then the next scheduled
    thread will probably turn interrupts back on. */
 void sema_down(struct semaphore* sema) {
-  enum intr_level old_level;
-
   ASSERT(sema != NULL);
   ASSERT(!intr_context());
 
-  old_level = intr_disable();
-  while (sema->value == 0) {
-    list_push_back(&sema->waiters, &thread_current()->elem);
-    thread_block();
-  }
-  sema->value--;
-  intr_set_level(old_level);
+  DISABLE_INTR({
+    while (sema->value == 0) {
+      list_insert_ordered(&sema->waiters, &thread_current()->elem, &thread_before, &grater_pri);
+      thread_block();
+    }
+    sema->value--;
+  });
 }
 
 /* Down or "P" operation on a semaphore, but only if the
@@ -76,18 +77,17 @@ void sema_down(struct semaphore* sema) {
 
    This function may be called from an interrupt handler. */
 bool sema_try_down(struct semaphore* sema) {
-  enum intr_level old_level;
   bool success;
 
   ASSERT(sema != NULL);
 
-  old_level = intr_disable();
-  if (sema->value > 0) {
-    sema->value--;
-    success = true;
-  } else
-    success = false;
-  intr_set_level(old_level);
+  DISABLE_INTR({
+    if (sema->value > 0) {
+      sema->value--;
+      success = true;
+    } else
+      success = false;
+  });
 
   return success;
 }
@@ -97,15 +97,13 @@ bool sema_try_down(struct semaphore* sema) {
 
    This function may be called from an interrupt handler. */
 void sema_up(struct semaphore* sema) {
-  enum intr_level old_level;
-
   ASSERT(sema != NULL);
 
-  old_level = intr_disable();
-  if (!list_empty(&sema->waiters))
-    thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
-  sema->value++;
-  intr_set_level(old_level);
+  DISABLE_INTR({
+    if (!list_empty(&sema->waiters))
+      thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+    sema->value++;
+  });
 }
 
 static void sema_test_helper(void* sema_);
@@ -174,9 +172,22 @@ void lock_acquire(struct lock* lock) {
   ASSERT(lock != NULL);
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
+  struct thread* t = thread_current();
 
-  sema_down(&lock->semaphore);
-  lock->holder = thread_current();
+  enum intr_level old_level = intr_disable();
+
+  if (--lock->state < 0) {
+    t->donee = lock->holder;
+    donate_pri_acquire(t, lock->holder);
+    sema_down(&lock->semaphore);
+  } else {
+    lock->semaphore.value = 0;
+  }
+
+  intr_set_level(old_level);
+
+  t->donee = NULL;
+  lock->holder = t;
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -206,8 +217,21 @@ void lock_release(struct lock* lock) {
   ASSERT(lock != NULL);
   ASSERT(lock_held_by_current_thread(lock));
 
+  struct thread* t = thread_current();
+  bool flag = false;
+
+  enum intr_level old_level = intr_disable();
+  if (++lock->state < 1) {
+    flag = donate_pri_release(t);
+    sema_up(&lock->semaphore);
+  } else {
+    lock->semaphore.value = 1;
+  }
   lock->holder = NULL;
-  sema_up(&lock->semaphore);
+  intr_set_level(old_level);
+
+  if (flag)
+    thread_yield();
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -356,4 +380,27 @@ void cond_broadcast(struct condition* cond, struct lock* lock) {
 
   while (!list_empty(&cond->waiters))
     cond_signal(cond, lock);
+}
+
+/* 执行优先级捐献逻辑，执行时需要禁用中断 */
+static void donate_pri_acquire(struct thread* self, struct thread* holder) {
+  ASSERT(holder != NULL);
+  ASSERT(self != NULL);
+  while (holder != NULL) {
+    if (self->e_pri <= holder->e_pri)
+      break;
+    holder->e_pri = self->e_pri;
+    holder = holder->donee;
+  }
+  return;
+}
+
+static bool donate_pri_release(struct thread* self) {
+  ASSERT(self != NULL);
+  if (self->e_pri == self->b_pri)
+    return false;
+  else {
+    self->e_pri = self->b_pri;
+    return true;
+  }
 }

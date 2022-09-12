@@ -74,10 +74,6 @@ static struct thread* thread_schedule_fair(void);
 static struct thread* thread_schedule_mlfqs(void);
 static struct thread* thread_schedule_reserved(void);
 
-static bool ready_before(const struct list_elem*, const struct list_elem*, void* aux);
-
-static bool grater_pri(struct thread*, struct thread*);
-
 /* Determines which scheduler the kernel should use.
    Controlled by the kernel command-line options
     "-sched=fifo", "-sched=prio",
@@ -214,7 +210,8 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   rw_lock_init(&(t->lock));
   t->donee = NULL;
   t->donated_for = NULL;
-  t->b_pri = t->e_pri = priority;
+  t->b_pri = priority;
+  t->e_pri = priority;
 
   /* 
    * Stack frame for kernel_thread(). 
@@ -246,6 +243,10 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
    * 
    * */
   thread_unblock(t);
+// TODO
+  if(thread_get_priority() < priority) {
+    thread_yield();
+  }
 
   return tid;
 }
@@ -284,7 +285,7 @@ static void thread_enqueue(struct thread* t) {
   if (active_sched_policy == SCHED_FIFO)
     list_push_back(&ready_list, &t->elem);
   else if (active_sched_policy == SCHED_PRIO)
-    list_insert_ordered(&ready_list, &t->elem, &ready_before, &grater_pri);
+    list_insert_ordered(&ready_list, &t->elem, &thread_before, &grater_pri);
   else
     PANIC("Unimplemented scheduling policy value: %d", active_sched_policy);
 }
@@ -692,7 +693,7 @@ static tid_t allocate_tid(void) {
   return tid;
 }
 
-static bool ready_before(const struct list_elem* elem_a, const struct list_elem* elem_b,
+bool thread_before(const struct list_elem* elem_a, const struct list_elem* elem_b,
                          void* aux) {
   bool (*grater_pri)(struct thread*, struct thread*) = aux;
   struct thread* thread_a = list_entry(elem_a, struct thread, elem);
@@ -700,7 +701,8 @@ static bool ready_before(const struct list_elem* elem_a, const struct list_elem*
   return grater_pri(thread_a, thread_b);
 }
 
-static bool grater_pri(struct thread* thread_a, struct thread* thread_b) {
+/* 比较实际优先级，如果a更大返回true */
+bool grater_pri(struct thread* thread_a, struct thread* thread_b) {
   return thread_a->e_pri > thread_b->e_pri;
 }
 

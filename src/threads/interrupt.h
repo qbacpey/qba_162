@@ -19,7 +19,7 @@ enum intr_level intr_set_level(enum intr_level);
 enum intr_level intr_enable(void);
 enum intr_level intr_disable(void);
 
-/* 禁用中断环境下执行action */
+/* 禁用中断，执行action */
 #define DISABLE_INTR(action)                                                                       \
   do {                                                                                             \
     enum intr_level old_level = intr_disable();                                                    \
