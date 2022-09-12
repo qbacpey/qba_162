@@ -387,16 +387,21 @@ void thread_foreach(thread_action_func* func, void* aux) {
 
 /* Sets the current thread's priority to NEW_PRIORITY.（注意，设置的是Base Pri） */
 void thread_set_priority(int new_priority) {
-
-  struct thread* t = thread_current();
-  if (t->b_pri == t->e_pri) {
-    t->e_pri = new_priority;
-  }
-  t->b_pri = new_priority;
+  DISABLE_INTR({
+    struct thread* t = thread_current();
+    if (t->b_pri == t->e_pri) {
+      t->e_pri = new_priority;
+    }
+    t->b_pri = new_priority;
+  });
 }
 
 /* Returns the current thread's priority. */
-int thread_get_priority(void) { return thread_current()->e_pri; }
+int thread_get_priority(void) {
+  int pri;
+  DISABLE_INTR({ pri = thread_current()->e_pri; });
+  return pri;
+}
 
 /* Sets the current thread's nice value to NICE. */
 void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */

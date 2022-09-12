@@ -214,26 +214,34 @@ static void start_process(void* init_pcb_) {
   // does not try to activate our uninitialized pagedir
   new_pcb->pagedir = NULL;
   t->pcb = new_pcb;
-  t->pcb->parent = init_pcb->parent;
+  new_pcb->parent = init_pcb->parent;
 
   // 初始化文件描述符表
-  list_init(&(t->pcb->files_tab));
-  lock_init(&t->pcb->files_lock);
-  t->pcb->files_next_desc = 3;
-  t->pcb->filesys_sema = NULL;
+  list_init(&(new_pcb->files_tab));
+  lock_init(&new_pcb->files_lock);
+  new_pcb->files_next_desc = 3;
+  new_pcb->filesys_sema = NULL;
 
   // 初始化子进程表
-  t->pcb->self = self;
-  list_init(&(t->pcb->children));
-  t->pcb->editing = editing;
-  lock_init(&(t->pcb->children_lock));
+  new_pcb->self = self;
+  list_init(&(new_pcb->children));
+  new_pcb->editing = editing;
+  lock_init(&(new_pcb->children_lock));
 
   // 初始化线程表
-  // list_init ( &(t->pcb->threads) );
+  // list_init ( &(new_pcb->threads) );
+
+  // 初始化进程锁列表
+  rw_lock_init(&new_pcb->locks_lock);
+  list_init(&(new_pcb->locks_tab));
+
+  // 初始化进程信号量列表
+  rw_lock_init(&new_pcb->semas_lock);
+  list_init(&(new_pcb->semas_tab));
 
   // Continue initializing the PCB as normal
-  t->pcb->main_thread = t;
-  strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+  new_pcb->main_thread = t;
+  strlcpy(new_pcb->process_name, t->name, sizeof t->name);
 
   /* Initialize interrupt frame and load executable. */
 
@@ -555,6 +563,18 @@ void process_exit(int exit_code) {
   list_clean_each(file_pos, &(pcb_to_free->files_tab), elem, {
     file_close(file_pos->file);
     free(file_pos);
+  });
+
+  // 释放进程锁列表
+  struct registered_lock* lock_pos = NULL;
+  list_clean_each(lock_pos, &(pcb_to_free->locks_tab), elem, {
+    free(lock_pos);
+  });
+
+  // 释放进程信号量列表
+  struct registered_lock* sema_pos = NULL;
+  list_clean_each(sema_pos, &(pcb_to_free->semas_tab), elem, {
+    free(sema_pos);
   });
 
   /* 释放子进程表 */

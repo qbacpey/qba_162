@@ -33,12 +33,12 @@ static double handler_compute_e(uint32_t* args, struct process* pcb);
 static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
 static void handler_pthread_exit(void) NO_RETURN;
 static tid_t handler_pthread_join(tid_t tid);
-static bool handler_lock_init(lock_t* lock);
-static bool handler_lock_acquire(lock_t* lock);
-static bool handler_lock_release(lock_t* lock);
-static bool handler_sema_init(sema_t* sema, int val);
-static bool handler_sema_down(sema_t* sema);
-static bool handler_sema_up(sema_t* sema);
+static bool handler_lock_init(lock_t* lock, struct process* pcb);
+static bool handler_lock_acquire(lock_t* lock, struct process* pcb);
+static bool handler_lock_release(lock_t* lock, struct process* pcb);
+static bool handler_sema_init(sema_t* sema, int val, struct process* pcb);
+static bool handler_sema_down(sema_t* sema, struct process* pcb);
+static bool handler_sema_up(sema_t* sema, struct process* pcb);
 static tid_t handler_get_tid(void);
 
 static inline bool check_fd(uint32_t,
@@ -183,6 +183,46 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       beneath = check_boundary(args + 1);
       if (beneath) {
         f->eax = beneath ? handler_compute_e(args, pcb) : -1;
+      }
+      break;
+
+    case SYS_LOCK_INIT:
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = handler_lock_init((lock_t *)args[1], pcb);
+      }
+      break;
+
+    case SYS_LOCK_ACQUIRE:
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = handler_lock_acquire((lock_t *)args[1], pcb);
+      }
+      break;
+
+    case SYS_LOCK_RELEASE:
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = handler_lock_release((lock_t *)args[1], pcb);
+      }
+      break;
+
+    case SYS_SEMA_INIT:
+      beneath = check_boundary(args + 1) && args[2] >= 0;
+      if (beneath) {
+        f->eax = handler_sema_init((lock_t*)args[1], (int)args[2], pcb);
+      }
+      break;
+    case SYS_SEMA_DOWN:
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = handler_sema_down((lock_t*)args[1], pcb);
+      }
+      break;
+    case SYS_SEMA_UP:
+      beneath = check_boundary(args + 1);
+      if (beneath) {
+        f->eax = handler_sema_up((lock_t*)args[1], pcb);
       }
       break;
 
@@ -449,6 +489,116 @@ static int handler_write(uint32_t* args, struct process* pcb) {
   }
   lock_release(files_tab_lock);
   return off;
+}
+
+/**
+ * @brief 将锁注册到内核空间
+ * 
+ * @param lock 指向用户空间的lock_t的指针
+ * @return true 
+ * @return false 
+ */
+static bool handler_lock_init(lock_t* lock, struct process* pcb){
+  struct rw_lock *locks_lock = &(pcb->locks_lock);
+  struct list *locks_tab = &(pcb->locks_tab);
+  rw_lock_acquire(locks_lock, RW_WRITER);
+
+  struct registered_lock *lock_pos = NULL;
+  bool found = false;
+  list_for_each_entry(lock_pos, locks_tab, elem){
+    if(lock_pos->lid == lock){
+      found = true;
+      break;
+    }
+  }
+
+  if(found){
+    rw_lock_release(locks_lock, RW_WRITER);
+    return false;
+  }
+
+  malloc_type(lock_pos);
+  barrier();
+  lock_pos->lid = lock;
+  lock_init(&(lock_pos->lock));
+  list_push_front(locks_tab, &(lock_pos->elem));
+  rw_lock_release(locks_lock, RW_WRITER);
+  return true;
+}
+
+/**
+ * @brief 获取锁，如果需要的话阻塞
+ * 
+ * 获取锁成功时返回true
+ * 如果锁尚未被注册到内核中或者当前线程已经获取该锁时返回false
+ * 
+ * @param lock 指向用户空间的lock_t的指针
+ */
+static bool handler_lock_acquire(lock_t* lock, struct process* pcb) {
+  struct rw_lock* locks_lock = &(pcb->locks_lock);
+  struct list* locks_tab = &(pcb->locks_tab);
+  rw_lock_acquire(locks_lock, RW_READER);
+  
+  struct registered_lock *lock_pos = NULL;
+  bool found = false;
+  list_for_each_entry(lock_pos, locks_tab, elem){
+    if(lock_pos->lid == lock){
+      found = true;
+      break;
+    }
+  }
+
+  if(!found || lock_held_by_current_thread(&(lock_pos->lock))){
+    rw_lock_release(locks_lock, RW_READER);
+    return false;
+  }
+  rw_lock_release(locks_lock, RW_READER);
+
+  
+  lock_acquire(&(lock_pos->lock));
+  return true;
+}
+
+/**
+ * @brief 释放锁
+ * 
+ * 释放锁成功时返回true
+ * 如果锁尚未被注册到内核中或者当前线程未持有该锁时返回false
+ * 
+ * @param lock 指向用户空间的lock_t的指针
+ */
+static bool handler_lock_release(lock_t* lock, struct process* pcb){
+  struct rw_lock* locks_lock = &(pcb->locks_lock);
+  struct list* locks_tab = &(pcb->locks_tab);
+  rw_lock_acquire(locks_lock, RW_READER);
+  
+  struct registered_lock *lock_pos = NULL;
+  bool found = false;
+  list_for_each_entry(lock_pos, locks_tab, elem){
+    if(lock_pos->lid == lock){
+      found = true;
+      break;
+    }
+  }
+
+  if(!found || !lock_held_by_current_thread(&(lock_pos->lock))){
+    rw_lock_release(locks_lock, RW_READER);
+    return false;
+  }
+  rw_lock_release(locks_lock, RW_READER);
+
+  lock_release(&(lock_pos->lock));
+  return true;
+}
+
+static bool handler_sema_init(sema_t* sema, int val, struct process* pcb){
+
+}
+static bool handler_sema_down(sema_t* sema, struct process* pcb){
+
+}
+static bool handler_sema_up(sema_t* sema, struct process* pcb){
+  
 }
 
 static inline bool check_fd(uint32_t fd, struct process* pcb) { return pcb->files_next_desc >= fd; }

@@ -10,7 +10,6 @@
 #define MAX_STACK_PAGES (1 << 11)
 #define MAX_THREADS 127
 
-
 /* PIDs and TIDs are the same type. PID should be
    the TID of the main thread of the process */
 typedef tid_t pid_t;
@@ -20,15 +19,15 @@ typedef void (*pthread_fun)(void*);
 typedef void (*stub_fun)(pthread_fun, void*);
 
 struct registered_lock {
-    lock_t lid; /* 锁的标识符 */
-    struct lock lock; /* 锁本身 */
-    struct list_elem elem; /* List element */
+  lock_t *lid;            /* 锁的标识符 */
+  struct lock lock;      /* 锁本身 */
+  struct list_elem elem; /* List element */
 };
 
 struct registered_sema {
-    sema_t sid; /* 信号量的标识符 */
-    struct semaphore sema; /* 信号量本身 */
-    struct list_elem elem; /* List element */
+  sema_t *sid;            /* 信号量的标识符 */
+  struct semaphore sema; /* 信号量本身 */
+  struct list_elem elem; /* List element */
 };
 
 /* 文件描述符表元素 
@@ -170,7 +169,11 @@ struct process {
   struct semaphore* filesys_sema; /* 全局文件系统信号量指针 */
   uint32_t files_next_desc;       /* 下一文件描述符 */
 
-  struct list threads; /* 元素是TCB */
+  struct list threads;       /* 元素是TCB */
+  struct rw_lock locks_lock; /* 进程用户空间锁列表读写锁 */
+  struct list locks_tab;     /* 进程用户空间锁列表 */
+  struct rw_lock semas_lock; /* 进程用户空间信号量列表读写锁 */
+  struct list semas_tab;     /* 进程用户空间信号量列表 */
 
   struct thread* main_thread; /* Pointer to main thread */
 };

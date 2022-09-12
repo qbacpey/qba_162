@@ -139,37 +139,16 @@ void sys_pthread_exit() {
  * */ 
 tid_t sys_pthread_join(tid_t tid) { return syscall1(SYS_PT_JOIN, tid); }
 
-/**
- * @brief 将锁注册到内核空间
- * 
- * @param lock 指向用户空间的lock_t的指针
- * @return true 
- * @return false 
- */
+
 bool lock_init(lock_t* lock) { return syscall1(SYS_LOCK_INIT, lock); }
 
-/**
- * @brief 获取锁，如果需要的话阻塞
- * 
- * 获取锁成功时返回true
- * 如果锁尚未被注册到内核中或者当前线程已经获取该锁时返回false
- * 
- * @param lock 指向用户空间的lock_t的指针
- */
+
 void lock_acquire(lock_t* lock) {
   bool success = syscall1(SYS_LOCK_ACQUIRE, lock);
   if (!success)
     exit(1);
 }
 
-/**
- * @brief 释放锁
- * 
- * 释放锁成功时返回true
- * 如果锁尚未被注册到内核中或者当前线程未持有该锁时返回false
- * 
- * @param lock 指向用户空间的lock_t的指针
- */
 void lock_release(lock_t* lock) {
   bool success = syscall1(SYS_LOCK_RELEASE, lock);
   if (!success)
