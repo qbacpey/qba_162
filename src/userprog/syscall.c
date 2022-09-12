@@ -36,7 +36,7 @@ static tid_t handler_pthread_join(tid_t tid);
 static bool handler_lock_init(lock_t* lock, struct process* pcb);
 static bool handler_lock_acquire(lock_t* lock, struct process* pcb);
 static bool handler_lock_release(lock_t* lock, struct process* pcb);
-static bool handler_sema_init(sema_t* sema, int val, struct process* pcb);
+static bool handler_sema_init(sema_t* sema, unsigned int val, struct process* pcb);
 static bool handler_sema_down(sema_t* sema, struct process* pcb);
 static bool handler_sema_up(sema_t* sema, struct process* pcb);
 static tid_t handler_get_tid(void);
@@ -189,40 +189,40 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     case SYS_LOCK_INIT:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_lock_init((lock_t *)args[1], pcb);
+        f->eax = handler_lock_init((lock_t*)args[1], pcb);
       }
       break;
 
     case SYS_LOCK_ACQUIRE:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_lock_acquire((lock_t *)args[1], pcb);
+        f->eax = handler_lock_acquire((lock_t*)args[1], pcb);
       }
       break;
 
     case SYS_LOCK_RELEASE:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_lock_release((lock_t *)args[1], pcb);
+        f->eax = handler_lock_release((lock_t*)args[1], pcb);
       }
       break;
 
     case SYS_SEMA_INIT:
-      beneath = check_boundary(args + 1) && args[2] >= 0;
+      beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_sema_init((lock_t*)args[1], (int)args[2], pcb);
+        f->eax = handler_sema_init((sema_t*)args[1], (unsigned int)args[2], pcb);
       }
       break;
     case SYS_SEMA_DOWN:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_sema_down((lock_t*)args[1], pcb);
+        f->eax = handler_sema_down((sema_t*)args[1], pcb);
       }
       break;
     case SYS_SEMA_UP:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_sema_up((lock_t*)args[1], pcb);
+        f->eax = handler_sema_up((sema_t*)args[1], pcb);
       }
       break;
 
@@ -498,21 +498,21 @@ static int handler_write(uint32_t* args, struct process* pcb) {
  * @return true 
  * @return false 
  */
-static bool handler_lock_init(lock_t* lock, struct process* pcb){
-  struct rw_lock *locks_lock = &(pcb->locks_lock);
-  struct list *locks_tab = &(pcb->locks_tab);
+static bool handler_lock_init(lock_t* lock, struct process* pcb) {
+  struct rw_lock* locks_lock = &(pcb->locks_lock);
+  struct list* locks_tab = &(pcb->locks_tab);
   rw_lock_acquire(locks_lock, RW_WRITER);
 
-  struct registered_lock *lock_pos = NULL;
+  struct registered_lock* lock_pos = NULL;
   bool found = false;
-  list_for_each_entry(lock_pos, locks_tab, elem){
-    if(lock_pos->lid == lock){
+  list_for_each_entry(lock_pos, locks_tab, elem) {
+    if (lock_pos->lid == lock) {
       found = true;
       break;
     }
   }
 
-  if(found){
+  if (found) {
     rw_lock_release(locks_lock, RW_WRITER);
     return false;
   }
@@ -538,23 +538,22 @@ static bool handler_lock_acquire(lock_t* lock, struct process* pcb) {
   struct rw_lock* locks_lock = &(pcb->locks_lock);
   struct list* locks_tab = &(pcb->locks_tab);
   rw_lock_acquire(locks_lock, RW_READER);
-  
-  struct registered_lock *lock_pos = NULL;
+
+  struct registered_lock* lock_pos = NULL;
   bool found = false;
-  list_for_each_entry(lock_pos, locks_tab, elem){
-    if(lock_pos->lid == lock){
+  list_for_each_entry(lock_pos, locks_tab, elem) {
+    if (lock_pos->lid == lock) {
       found = true;
       break;
     }
   }
 
-  if(!found || lock_held_by_current_thread(&(lock_pos->lock))){
+  if (!found || lock_held_by_current_thread(&(lock_pos->lock))) {
     rw_lock_release(locks_lock, RW_READER);
     return false;
   }
   rw_lock_release(locks_lock, RW_READER);
 
-  
   lock_acquire(&(lock_pos->lock));
   return true;
 }
@@ -567,21 +566,21 @@ static bool handler_lock_acquire(lock_t* lock, struct process* pcb) {
  * 
  * @param lock 指向用户空间的lock_t的指针
  */
-static bool handler_lock_release(lock_t* lock, struct process* pcb){
+static bool handler_lock_release(lock_t* lock, struct process* pcb) {
   struct rw_lock* locks_lock = &(pcb->locks_lock);
   struct list* locks_tab = &(pcb->locks_tab);
   rw_lock_acquire(locks_lock, RW_READER);
-  
-  struct registered_lock *lock_pos = NULL;
+
+  struct registered_lock* lock_pos = NULL;
   bool found = false;
-  list_for_each_entry(lock_pos, locks_tab, elem){
-    if(lock_pos->lid == lock){
+  list_for_each_entry(lock_pos, locks_tab, elem) {
+    if (lock_pos->lid == lock) {
       found = true;
       break;
     }
   }
 
-  if(!found || !lock_held_by_current_thread(&(lock_pos->lock))){
+  if (!found || !lock_held_by_current_thread(&(lock_pos->lock))) {
     rw_lock_release(locks_lock, RW_READER);
     return false;
   }
@@ -591,14 +590,79 @@ static bool handler_lock_release(lock_t* lock, struct process* pcb){
   return true;
 }
 
-static bool handler_sema_init(sema_t* sema, int val, struct process* pcb){
+static bool handler_sema_init(sema_t* sema,unsigned int val, struct process* pcb) {
+  struct rw_lock* semas_lock = &(pcb->semas_lock);
+  struct list* semas_tab = &(pcb->semas_tab);
+  rw_lock_acquire(semas_lock, RW_WRITER);
 
-}
-static bool handler_sema_down(sema_t* sema, struct process* pcb){
+  struct registered_sema* sema_pos = NULL;
+  bool found = false;
+  list_for_each_entry(sema_pos, semas_tab, elem) {
+    if (sema_pos->sid == sema) {
+      found = true;
+      break;
+    }
+  }
 
+  if (found) {
+    rw_lock_release(semas_lock, RW_WRITER);
+    return false;
+  }
+
+  malloc_type(sema_pos);
+  barrier();
+  sema_pos->sid = sema;
+  sema_init(&(sema_pos->sema), val);
+  list_push_front(semas_tab, &(sema_pos->elem));
+  rw_lock_release(semas_lock, RW_WRITER);
+  return true;
 }
-static bool handler_sema_up(sema_t* sema, struct process* pcb){
-  
+static bool handler_sema_down(sema_t* sema, struct process* pcb) {
+  struct rw_lock* semas_lock = &(pcb->semas_lock);
+  struct list* semas_tab = &(pcb->semas_tab);
+  rw_lock_acquire(semas_lock, RW_READER);
+
+  struct registered_sema* sema_pos = NULL;
+  bool found = false;
+  list_for_each_entry(sema_pos, semas_tab, elem) {
+    if (sema_pos->sid == sema) {
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    rw_lock_release(semas_lock, RW_READER);
+    return false;
+  }
+  rw_lock_release(semas_lock, RW_READER);
+
+  sema_down(&(sema_pos->sema));
+  return true;
+}
+
+static bool handler_sema_up(sema_t* sema, struct process* pcb) {
+  struct rw_lock* semas_lock = &(pcb->semas_lock);
+  struct list* semas_tab = &(pcb->semas_tab);
+  rw_lock_acquire(semas_lock, RW_READER);
+
+  struct registered_sema* sema_pos = NULL;
+  bool found = false;
+  list_for_each_entry(sema_pos, semas_tab, elem) {
+    if (sema_pos->sid == sema) {
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    rw_lock_release(semas_lock, RW_READER);
+    return false;
+  }
+  rw_lock_release(semas_lock, RW_READER);
+
+  sema_up(&(sema_pos->sema));
+  return true;
 }
 
 static inline bool check_fd(uint32_t fd, struct process* pcb) { return pcb->files_next_desc >= fd; }
