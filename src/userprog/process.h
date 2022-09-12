@@ -19,6 +19,18 @@ typedef tid_t pid_t;
 typedef void (*pthread_fun)(void*);
 typedef void (*stub_fun)(pthread_fun, void*);
 
+struct registered_lock {
+    lock_t lid; /* 锁的标识符 */
+    struct lock lock; /* 锁本身 */
+    struct list_elem elem; /* List element */
+};
+
+struct registered_sema {
+    sema_t sid; /* 信号量的标识符 */
+    struct semaphore sema; /* 信号量本身 */
+    struct list_elem elem; /* List element */
+};
+
 /* 文件描述符表元素 
  * 
  * 开启即创建，关闭即释放

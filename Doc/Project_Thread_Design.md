@@ -428,6 +428,11 @@ struct process {
 - `bool exiting` 初始为`false`；
 - `struct thread *thread_exiting` 初始为`NULL`
 
+注意:
+1. `b_pri`只能通过`thread_set_priority`设置；
+2. `e_pri`则通过优先级捐献进行设置；
+3. `thread_get_priority`会返回`e_pri`；
+
 ### thread.h
 
 #### enum thread_status

@@ -7,6 +7,14 @@
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
 
+#ifndef USER_SYNC_TYPE
+#define USER_SYNC_TYPE
+/* Synchronization Types */
+typedef char lock_t;
+typedef char sema_t;
+#endif
+
+
 /* States in a thread's life cycle. */
 enum thread_status {
   THREAD_RUNNING, /* Running thread. */

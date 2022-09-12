@@ -207,11 +207,6 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   /* Initialize thread. */
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
-  rw_lock_init(&(t->lock));
-  t->donee = NULL;
-  t->donated_for = NULL;
-  t->b_pri = priority;
-  t->e_pri = priority;
 
   /* 
    * Stack frame for kernel_thread(). 
@@ -390,8 +385,15 @@ void thread_foreach(thread_action_func* func, void* aux) {
   }
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
-void thread_set_priority(int new_priority) { thread_current()->e_pri = new_priority; }
+/* Sets the current thread's priority to NEW_PRIORITY.（注意，设置的是Base Pri） */
+void thread_set_priority(int new_priority) {
+
+  struct thread* t = thread_current();
+  if (t->b_pri == t->e_pri) {
+    t->e_pri = new_priority;
+  }
+  t->b_pri = new_priority;
+}
 
 /* Returns the current thread's priority. */
 int thread_get_priority(void) { return thread_current()->e_pri; }
@@ -505,6 +507,12 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->e_pri = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
+
+  rw_lock_init(&(t->lock));
+  t->donee = NULL;
+  t->donated_for = NULL;
+  t->b_pri = priority;
+  t->e_pri = priority;
 
   /* 
    * 对all_list的操作需要 禁用中断
