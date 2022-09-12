@@ -22,7 +22,9 @@
 
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
-static struct list fifo_ready_list;
+static struct list ready_list;
+
+/* Strict Priority Scheduler 的 Ready Queue，列表中越靠前优先级越高 */
 
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
@@ -72,6 +74,10 @@ static struct thread* thread_schedule_fair(void);
 static struct thread* thread_schedule_mlfqs(void);
 static struct thread* thread_schedule_reserved(void);
 
+static bool ready_before(const struct list_elem*, const struct list_elem*, void* aux);
+
+static bool grater_pri(struct thread*, struct thread*);
+
 /* Determines which scheduler the kernel should use.
    Controlled by the kernel command-line options
     "-sched=fifo", "-sched=prio",
@@ -107,7 +113,7 @@ void thread_init(void) {
   ASSERT(intr_get_level() == INTR_OFF);
 
   lock_init(&tid_lock);
-  list_init(&fifo_ready_list);
+  list_init(&ready_list);
   list_init(&all_list);
 
   /* Set up a thread structure for the running thread. */
@@ -205,6 +211,10 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   /* Initialize thread. */
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
+  rw_lock_init(&(t->lock));
+  t->donee = NULL;
+  t->donated_for = NULL;
+  t->b_pri = t->e_pri = priority;
 
   /* 
    * Stack frame for kernel_thread(). 
@@ -272,7 +282,9 @@ static void thread_enqueue(struct thread* t) {
   ASSERT(is_thread(t));
 
   if (active_sched_policy == SCHED_FIFO)
-    list_push_back(&fifo_ready_list, &t->elem);
+    list_push_back(&ready_list, &t->elem);
+  else if (active_sched_policy == SCHED_PRIO)
+    list_insert_ordered(&ready_list, &t->elem, &ready_before, &grater_pri);
   else
     PANIC("Unimplemented scheduling policy value: %d", active_sched_policy);
 }
@@ -378,10 +390,10 @@ void thread_foreach(thread_action_func* func, void* aux) {
 }
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
-void thread_set_priority(int new_priority) { thread_current()->priority = new_priority; }
+void thread_set_priority(int new_priority) { thread_current()->e_pri = new_priority; }
 
 /* Returns the current thread's priority. */
-int thread_get_priority(void) { return thread_current()->priority; }
+int thread_get_priority(void) { return thread_current()->e_pri; }
 
 /* Sets the current thread's nice value to NICE. */
 void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */
@@ -489,10 +501,10 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
-  t->priority = priority;
+  t->e_pri = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
-  
+
   /* 
    * 对all_list的操作需要 禁用中断
    * 而且all_list中的线程是尚未结束的线程
@@ -534,15 +546,18 @@ static void* alloc_frame(struct thread* t, size_t size) {
  * 而thread_yield会在执行schedule之前将TCB放回到等待队列的末尾
  * */
 static struct thread* thread_schedule_fifo(void) {
-  if (!list_empty(&fifo_ready_list))
-    return list_entry(list_pop_front(&fifo_ready_list), struct thread, elem);
+  if (!list_empty(&ready_list))
+    return list_entry(list_pop_front(&ready_list), struct thread, elem);
   else
     return idle_thread;
 }
 
 /* TODO Strict priority scheduler */
 static struct thread* thread_schedule_prio(void) {
-  PANIC("Unimplemented scheduler policy: \"-sched=prio\"");
+  if (!list_empty(&ready_list))
+    return list_entry(list_pop_front(&ready_list), struct thread, elem);
+  else
+    return idle_thread;
 }
 
 /* Fair priority scheduler */
@@ -661,7 +676,7 @@ static void schedule(void) {
      那么就调用switch_threads执行线程切换
      注意，switch_threads执行前后线程的身份是不一样的 */
   if (cur != next)
-    prev = switch_threads(cur, next); 
+    prev = switch_threads(cur, next);
   thread_switch_tail(prev);
 }
 
@@ -675,6 +690,18 @@ static tid_t allocate_tid(void) {
   lock_release(&tid_lock);
 
   return tid;
+}
+
+static bool ready_before(const struct list_elem* elem_a, const struct list_elem* elem_b,
+                         void* aux) {
+  bool (*grater_pri)(struct thread*, struct thread*) = aux;
+  struct thread* thread_a = list_entry(elem_a, struct thread, elem);
+  struct thread* thread_b = list_entry(elem_b, struct thread, elem);
+  return grater_pri(thread_a, thread_b);
+}
+
+static bool grater_pri(struct thread* thread_a, struct thread* thread_b) {
+  return thread_a->e_pri > thread_b->e_pri;
 }
 
 /* Offset of `stack' member within `struct thread'.

@@ -96,16 +96,23 @@ typedef int tid_t;
    blocked state is on a semaphore wait list. */
 struct thread {
   /* Owned by thread.c. */
-  // 到时候在这里加一个指针算了 
+  // 到时候在这里加一个指针算了
 
   tid_t tid;                 /* Thread identifier. */
   enum thread_status status; /* Thread state. */
   char name[16];             /* Name (for debugging purposes). */
   uint8_t* stack;            /* Saved stack pointer. */
-  int priority;              /* Priority. */
   struct list_elem allelem;  /* List element for all threads list. */
 
   int64_t wake_up; // 需要在什么时候醒来
+  
+  /* Strict Priority Scheduler相关 */
+  struct rw_lock lock;      // 修改TCB之前需要获取此锁
+  struct thread* donee;     // 线程优先级的捐献对象
+  struct lock* donated_for; // 线程因为哪一个锁诱发优先级捐献？
+  uint8_t b_pri;            // 线程的基本优先级.
+  uint8_t e_pri;            // 线程的实际优先级
+
 
   /* Shared between thread.c / synch.c. / timer.c */
   struct list_elem elem; /* List element. */

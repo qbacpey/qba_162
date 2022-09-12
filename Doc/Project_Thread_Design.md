@@ -121,7 +121,7 @@ Strict Priority Scheduler 的 Ready Queue，列表中越靠前优先级越高
 
 ~~~c
 struct rw_lock lock; // 修改TCB之前需要获取此锁
-int e_pri; // 线程的实际优先级
+uint8_t e_pri; // 线程的实际优先级
 struct thread *donee; // 线程优先级的捐献对象
 struct lock *donated_for; // 线程因为哪一个锁诱发优先级捐献？
 ~~~
@@ -129,15 +129,7 @@ struct lock *donated_for; // 线程因为哪一个锁诱发优先级捐献？
 ##### 修改部分
 
 ~~~c
-int priority; -> int b_pri; // 线程的基本优先级
-~~~
-
-#### struct semaphore
-
-##### 增加部分
-
-~~~c
-struct list waiting_list; // 等待此锁的线程，优先级队列
+uint8_t priority; -> uint8_t b_pri; // 线程的基本优先级
 ~~~
 
 #### struct lock
@@ -145,7 +137,7 @@ struct list waiting_list; // 等待此锁的线程，优先级队列
 ##### 增加部分
 
 ~~~c
-int state: // 当前锁的状态，3种状态仿照Linux2中内核锁实现
+uint8_t state; // 当前锁的状态，3种状态仿照Linux2中内核锁实现
 ~~~
 
 上述三种不同状态指的是：
@@ -177,6 +169,7 @@ int state: // 当前锁的状态，3种状态仿照Linux2中内核锁实现
 - 入列函数使用list_insert_pri，出列函数使用list_push（选出优先级最高的运行）；
 - 操作队列的时候需要禁用中断；
 - thread_yield可能也需要修改以确保优先级政策的正确实现；
+- 同优先级RR性质使用grater才插入进行实现
 
 ### 同步原语
 
