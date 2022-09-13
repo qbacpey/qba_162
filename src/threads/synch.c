@@ -33,7 +33,7 @@
 #include "threads/thread.h"
 #include "threads/malloc.h"
 
-static void donate_pri_acquire(struct thread* self, struct thread* holder);
+static bool donate_pri_acquire(struct thread* self, struct lock* lock);
 static bool donate_pri_release(struct thread* self);
 
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
@@ -64,9 +64,9 @@ void sema_down(struct semaphore* sema) {
   ASSERT(!intr_context());
 
   enum intr_level old_level = intr_disable();
-  list_sort(&sema->waiters, &thread_before, &grater_pri);
   while (sema->value == 0) {
     list_insert_ordered(&sema->waiters, &thread_current()->elem, &thread_before, &grater_pri);
+    thread_current()->queue = &sema->waiters;
     thread_block();
   }
   sema->value--;
@@ -102,14 +102,13 @@ void sema_up(struct semaphore* sema) {
   struct thread* t = NULL;
   DISABLE_INTR({
     if (!list_empty(&sema->waiters)) {
-      // 可能发生了优先级捐献，需要重整一下
-      list_sort(&sema->waiters, &thread_before, &grater_pri);
       t = list_entry(list_pop_front(&sema->waiters), struct thread, elem);
       thread_unblock(t);
     }
     sema->value++;
   });
 
+  // 优先级队列实现，由信号量全权负责
   if (t != NULL && !intr_context() && t->e_pri > thread_get_priority())
     thread_yield();
 }
@@ -181,18 +180,19 @@ void lock_acquire(struct lock* lock) {
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
   struct thread* t = thread_current();
-  
+
   enum intr_level old_level = intr_disable();
   if (--lock->state < 0) {
-    t->donee = lock->holder;
-    donate_pri_acquire(t, lock->holder);
+    if (donate_pri_acquire(t, lock)) 
+      t->donee = lock->holder;
     sema_down(&lock->semaphore);
-  } else {
+  } else 
     lock->semaphore.value = 0;
-  }
+  
   t->donee = NULL;
-  intr_set_level(old_level);
+  t->donated_for = NULL;
   lock->holder = t;
+  intr_set_level(old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -223,26 +223,23 @@ void lock_release(struct lock* lock) {
   ASSERT(lock_held_by_current_thread(lock));
 
   struct thread* t = thread_current();
-  bool flag = false;
   struct donated_his* h = NULL;
 
   DISABLE_INTR({
+    lock->holder = NULL;
     if (++lock->state < 1) {
+      if (!list_empty(&t->donated_his_tab)) {
+        h = list_entry(list_pop_front(&t->donated_his_tab), struct donated_his, elem);
+        t->e_pri = h->old_pri;
+        t->donated_for = h->old_donated_for;
+      }
       sema_up(&lock->semaphore);
     } else {
       lock->semaphore.value = 1;
     }
-    lock->holder = NULL;
-    if (!list_empty(&(t->donated_his_tab))) {
-      h = list_entry(list_pop_front(&(t->donated_his_tab)), struct donated_his, elem);
-      t->e_pri = h->old_pri;
-      flag = true;
-    } 
   });
-  if(h != NULL)
+  if (h != NULL)
     free(h);
-  if (flag)
-    thread_yield();
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -355,7 +352,10 @@ void cond_wait(struct condition* cond, struct lock* lock) {
 
   list_insert_ordered(&cond->waiters, &thread_current()->elem, &thread_before, &grater_pri);
   lock_release(lock);
-  DISABLE_INTR({ thread_block(); });
+  DISABLE_INTR({
+    thread_current()->queue = &cond->waiters;
+    thread_block();
+  });
 
   lock_acquire(lock);
 }
@@ -394,7 +394,6 @@ void cond_broadcast(struct condition* cond, struct lock* lock) {
   struct thread* t = NULL;
   bool flag = false;
   while (!list_empty(&cond->waiters)) {
-    list_sort(&cond->waiters, &thread_before, &grater_pri);
     t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
     thread_unblock(t);
     if (t->e_pri > thread_get_priority()) {
@@ -415,24 +414,44 @@ void cond_broadcast(struct condition* cond, struct lock* lock) {
     解决方法就是让执行优先级捐献的线程捐献优先级的时候
     记住捐献链末尾线程的实际优先级
     获取锁的时候用这个优先级将他恢复
+
+    如果发生了优先级捐献，需要返回true
+
+    有一个很严重的问题，线程可能会请求多个锁
+    这些不同的锁也有可能被不同的线程以不同的顺序请求
+    比如说线程H想要获取锁A，此时的锁A为线程M持有
+    为获取锁A，线程H需要将自己的优先级捐献给线程M
+    但是线程M此时正在被锁B阻塞，锁B为线程L所持有
+    也就是说，线程H不仅需要将自己的优先级捐献给线程M，还需要将优先级捐献给线程L
+    那么线程M获取并释放锁B之后，它不应该恢复到它本来的优先级
+    而是需要恢复到H，只有在释放锁A之后才能恢复到M
+
  */
-static void donate_pri_acquire(struct thread* self, struct thread* holder) {
+static bool donate_pri_acquire(struct thread* self, struct lock* lock) {
+  struct thread* holder = lock->holder;
   ASSERT(holder != NULL);
   ASSERT(self != NULL);
-  int8_t old_pri = holder->e_pri;
-  while (holder != NULL) {
-    if (self->e_pri <= holder->e_pri)
-      break;
-    // 保存捐献历史到对应TCB中
-    struct donated_his *his = NULL; 
-    malloc_type(his);
-    his->old_pri = holder->e_pri;
-    list_push_front(&(holder->donated_his_tab), &(his->elem));
-
+  if (self->e_pri <= holder->e_pri)
+      return false;
+  while (holder != NULL && self->e_pri > holder->e_pri) {
+    // 只有是针对不同资源的优先级捐献才触发捐献历史保存
+    if (holder->donated_for != lock) {
+      struct donated_his* his = NULL;
+      malloc_type(his);
+      his->old_pri = holder->e_pri;
+      his->old_donated_for = holder->donated_for;
+      holder->donated_for = lock;
+      list_push_front(&holder->donated_his_tab, &his->elem);
+    }
     holder->e_pri = self->e_pri;
+
+    // 重排它在队列中的顺序
+    list_remove(&holder->elem);
+    list_insert_ordered(holder->queue, &holder->elem, &thread_before, &grater_pri);
+
     holder = holder->donee;
   }
-  return;
+  return true;
 }
 
 static bool donate_pri_release(struct thread* self) {

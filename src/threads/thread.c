@@ -278,6 +278,7 @@ static void thread_enqueue(struct thread* t) {
   ASSERT(intr_get_level() == INTR_OFF);
   ASSERT(is_thread(t));
 
+  t->queue = &ready_list;
   if (active_sched_policy == SCHED_FIFO)
     list_push_back(&ready_list, &t->elem);
   else if (active_sched_policy == SCHED_PRIO)
@@ -392,16 +393,22 @@ void thread_foreach(thread_action_func* func, void* aux) {
 
 /* Sets the current thread's priority to NEW_PRIORITY.（注意，设置的是Base Pri） */
 void thread_set_priority(int new_priority) {
+  struct thread* t = thread_current();
+  // 只有基本优先级和实际优先级相等的时候才会对它们作出修改，因此之比一个就可以了
+  if (new_priority == t->b_pri) 
+    return;
+  
   bool flag = false;
   DISABLE_INTR({
-    struct thread* t = thread_current();
     if (t->b_pri == t->e_pri) {
       // 只有实际优先级和基本优先级相等的时候才设置实际优先级
       t->e_pri = new_priority;
       // 当前线程优先级减小
-      flag = t->b_pri > new_priority;
+      if (t->b_pri > new_priority) {
+        flag = true;
+        t->b_pri = new_priority;
+      }
     }
-    t->b_pri = new_priority;
   });
 
   if (flag)
@@ -521,7 +528,6 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
-  t->e_pri = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
 
@@ -730,6 +736,11 @@ bool thread_before(const struct list_elem* elem_a, const struct list_elem* elem_
 /* 比较实际优先级，如果a更大返回true */
 bool grater_pri(struct thread* thread_a, struct thread* thread_b) {
   return thread_a->e_pri > thread_b->e_pri;
+}
+
+/* 比较实际优先级，如果a大于或等于b返回true */
+bool grater_equal_pri(struct thread* thread_a, struct thread* thread_b) {
+  return thread_a->e_pri >= thread_b->e_pri;
 }
 
 /* Offset of `stack' member within `struct thread'.

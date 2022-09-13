@@ -25,6 +25,7 @@ enum thread_status {
 
 struct donated_his {
   int8_t old_pri; // 受赠之前的优先级
+  struct lock* old_donated_for; // 此优先级对应哪一个锁
   struct list_elem elem;
 };
 
@@ -120,15 +121,15 @@ struct thread {
   int64_t wake_up; // 需要在什么时候醒来
 
   /* Strict Priority Scheduler相关 */
-  struct rw_lock lock;      // 修改TCB之前需要获取此锁
-  struct thread* donee;     // 线程优先级的捐献对象
-  struct list donated_his_tab;  // 线程受优先级捐献之前的优先级
-  struct lock* donated_for; // 线程因为哪一个锁诱发优先级捐献？
-  int8_t b_pri;            // 线程的基本优先级.
-  int8_t e_pri;            // 线程的实际优先级
-
+  struct rw_lock lock;         // 修改TCB之前需要获取此锁
+  struct thread* donee;        // 线程优先级的捐献对象
+  struct list donated_his_tab; // 线程受优先级捐献之前的优先级
+  struct lock* donated_for;    // 线程最近一次接收的因为哪一个锁诱发？
+  int8_t b_pri;                // 线程的基本优先级.
+  int8_t e_pri;                // 线程的实际优先级
 
   /* Shared between thread.c / synch.c. / timer.c */
+  struct list *queue; /* 当前位于什么队列中 */
   struct list_elem elem; /* List element. */
 
 // 这里好像可以定义 PCB
@@ -195,5 +196,6 @@ int thread_get_load_avg(void);
 
 bool thread_before(const struct list_elem*, const struct list_elem*, void* aux);
 bool grater_pri(struct thread*, struct thread*);
+bool grater_equal_pri(struct thread*, struct thread*);
 
 #endif /* threads/thread.h */
