@@ -351,9 +351,9 @@ void thread_exit(void) {
      when it calls thread_switch_tail(). */
   intr_disable();
   list_remove(&thread_current()->allelem);
-  struct donated_his* his_pos = NULL;
-  list_clean_each(his_pos, &(thread_current()->donated_his_tab), elem, {
-    free(his_pos);
+  struct donated_record* record = NULL;
+  list_clean_each(record, &(thread_current()->donated_record_tab), elem, {
+    free(record);
   });
   thread_current()->status = THREAD_DYING;
   schedule();
@@ -532,11 +532,10 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->magic = THREAD_MAGIC;
 
   rw_lock_init(&(t->lock));
-  t->donee = NULL;
   t->donated_for = NULL;
+  list_init(&t->donated_record_tab);
   t->b_pri = priority;
   t->e_pri = priority;
-  list_init(&t->donated_his_tab);
 
   /* 
    * 对all_list的操作需要 禁用中断
