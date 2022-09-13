@@ -387,24 +387,34 @@ void thread_foreach(thread_action_func* func, void* aux) {
   }
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY.（注意，设置的是Base Pri） */
+/**
+ * @brief Sets the current thread's priority to NEW_PRIORITY.
+ * 
+ * 设置b_pri只有满足以下两个条件的时候才设置e_pri：
+ * 1.new_priority大于e_pri
+ * 2.donated_record_tab为空，当前线程未持有任何锁
+ * 
+ * 使用list_empty作为判断依据主要是考虑到可能有和当前线程优先级相同的
+ * 线程想要获取当前线程持有的锁，因此就算在当前线程持有锁之后，b_pri也依旧等于e_pri
+ * 因此不能将这两个是否相等作为优先级判断的依据，只能通过列表是否为空作为判断依据
+ * 
+ * @param new_priority 
+ */
 void thread_set_priority(int new_priority) {
   struct thread* t = thread_current();
   // 只有基本优先级和实际优先级相等的时候才会对它们作出修改，因此之比一个就可以了
   if (new_priority == t->b_pri) 
     return;
-  
+
   bool flag = false;
   DISABLE_INTR({
-    if (t->b_pri == t->e_pri) {
-      // 只有实际优先级和基本优先级相等的时候才设置实际优先级
+    if (new_priority > t->e_pri) {
       t->e_pri = new_priority;
-      // 当前线程优先级减小
-      if (t->b_pri > new_priority) {
-        flag = true;
-        t->b_pri = new_priority;
-      }
+    } else if (list_empty(&t->donated_record_tab)) {
+      t->e_pri = new_priority;
+      flag = true;
     }
+    t->b_pri = new_priority;
   });
 
   if (flag)
