@@ -111,6 +111,7 @@ void timer_sleep(int64_t ticks) {
 
   DISABLE_INTR({
     list_insert_ordered(&timer_sleep_list, &(t->elem), &wake_up_before, &less_sleep);
+    t->queue = NULL;
     thread_block();
   });
 }

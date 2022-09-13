@@ -33,8 +33,8 @@
 #include "threads/thread.h"
 #include "threads/malloc.h"
 
-static bool donate_pri_acquire(struct thread* self, struct lock* lock);
-static bool donate_pri_release(struct thread* self);
+static void donate_pri_acquire(struct thread* self, struct lock* lock);
+static bool lock_before(const struct list_elem* , const struct list_elem* , void* aux);
 
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
@@ -65,7 +65,7 @@ void sema_down(struct semaphore* sema) {
 
   enum intr_level old_level = intr_disable();
   while (sema->value == 0) {
-    list_insert_ordered(&sema->waiters, &thread_current()->elem, &thread_before, &grater_pri);
+    list_insert_ordered(&sema->waiters, &thread_current()->elem, &thread_before, &grater_thread_pri);
     thread_current()->queue = &sema->waiters;
     thread_block();
   }
@@ -164,6 +164,7 @@ void lock_init(struct lock* lock) {
 
   lock->holder = NULL;
   lock->state = 1;
+  lock->pri = 0;
   sema_init(&lock->semaphore, 1);
 }
 
@@ -179,25 +180,27 @@ void lock_acquire(struct lock* lock) {
   ASSERT(lock != NULL);
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
+
   struct thread* t = thread_current();
+  ASSERT(t!=NULL);
 
   enum intr_level old_level = intr_disable();
   if (--lock->state < 0) {
-    if (donate_pri_acquire(t, lock))
+    if (t->e_pri > lock->pri){
       t->donated_for = lock;
+      donate_pri_acquire(t, lock);
+    }
     sema_down(&lock->semaphore);
   } else
     lock->semaphore.value = 0;
 
-  /* 成功获取锁 压入优先级恢复记录 */
-  struct donated_record* record = NULL;
-  malloc_type(record);
-  record->pri = t->e_pri;
-  record->old_donated_for = lock;
-  list_push_front(&t->donated_record_tab, &record->elem);
-
-  t->donated_for = NULL;
+  // 不可在禁用中断的时候申请内存
+  // malloc_type(record);
+  // 成功获取锁 压入优先级恢复记录
+  lock->pri = t->e_pri;
   lock->holder = t;
+  t->donated_for = NULL;
+  list_insert_ordered(&t->donated_record_tab, &lock->elem, &lock_before, NULL);
   intr_set_level(old_level);
 }
 
@@ -212,10 +215,18 @@ bool lock_try_acquire(struct lock* lock) {
 
   ASSERT(lock != NULL);
   ASSERT(!lock_held_by_current_thread(lock));
+  struct thread* t = thread_current();
 
+  enum intr_level old_level = intr_disable();
   success = sema_try_down(&lock->semaphore);
-  if (success)
+  if (success) {
+    lock->state--;
+    lock->pri = t->e_pri;
+    lock->holder = t;
+    list_insert_ordered(&t->donated_record_tab, &lock->elem, &lock_before, NULL);
     lock->holder = thread_current();
+  }
+  intr_set_level(old_level);
   return success;
 }
 
@@ -229,22 +240,22 @@ void lock_release(struct lock* lock) {
   ASSERT(lock_held_by_current_thread(lock));
 
   struct thread* t = thread_current();
-  struct donated_record* r = NULL;
 
   DISABLE_INTR({
     lock->holder = NULL;
-    if (++lock->state < 1) {
-      if (!list_empty(&t->donated_record_tab)) {
-        r = list_entry(list_pop_front(&t->donated_record_tab), struct donated_record, elem);
-        t->e_pri = r->pri;
-      }
+    lock->pri = 0;
+
+    list_remove(&lock->elem);
+    if (list_empty(&t->donated_record_tab))
+      t->e_pri = t->b_pri;
+    else
+      t->e_pri = list_entry(list_begin(&t->donated_record_tab), struct lock, elem)->pri;
+
+    if (++lock->state < 1)
       sema_up(&lock->semaphore);
-    } else {
+    else
       lock->semaphore.value = 1;
-    }
   });
-  if (r != NULL)
-    free(r);
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -355,7 +366,7 @@ void cond_wait(struct condition* cond, struct lock* lock) {
   ASSERT(!intr_context());
   ASSERT(lock_held_by_current_thread(lock));
 
-  list_insert_ordered(&cond->waiters, &thread_current()->elem, &thread_before, &grater_pri);
+  list_insert_ordered(&cond->waiters, &thread_current()->elem, &thread_before, &grater_thread_pri);
   lock_release(lock);
   DISABLE_INTR({
     thread_current()->queue = &cond->waiters;
@@ -379,7 +390,7 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
   ASSERT(lock_held_by_current_thread(lock));
   struct thread* t = NULL;
   if (!list_empty(&cond->waiters)) {
-    list_sort(&cond->waiters, &thread_before, &grater_pri);
+    list_sort(&cond->waiters, &thread_before, &grater_thread_pri);
     t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
     thread_unblock(t);
   }
@@ -423,38 +434,40 @@ void cond_broadcast(struct condition* cond, struct lock* lock) {
     如果发生了优先级捐献，需要返回true
 
  */
-static bool donate_pri_acquire(struct thread* self, struct lock* lock) {
+static void donate_pri_acquire(struct thread* self, struct lock* lock) {
   struct thread* donee = lock->holder;
+  struct thread* donor = self;
   ASSERT(donee != NULL);
-  ASSERT(self != NULL);
-  if (self->e_pri <= donee->e_pri)
-    return false;
-  while (donee != NULL && self->e_pri > donee->e_pri) {
+  ASSERT(donor != NULL);
+  while (donor->e_pri > donee->e_pri) {
     // 只有是针对不同资源的优先级捐献才触发捐献历史保存
-    struct donated_record* record = NULL;
+    struct lock* record = NULL;
     list_for_each_entry(record, &(donee->donated_record_tab), elem) {
-      if (record->old_donated_for != donee->donated_for)
-        record->pri = self->e_pri; // 此恢复记录对应的锁在目标锁之后被获取
-      else
+      if (record == donor->donated_for)
         break; // 找到对应锁的回复记录
     }
-    donee->e_pri = self->e_pri;
+    donee->e_pri = donor->e_pri;
+    record->pri = donor->e_pri;
 
-    // 重排它在队列中的顺序
-    list_remove(&donee->elem);
-    list_insert_ordered(donee->queue, &donee->elem, &thread_before, &grater_pri);
+    // 重排锁在资源队列中的顺序
+    list_remove(&record->elem);
+    list_insert_ordered(&donee->donated_record_tab, &record->elem, &lock_before, NULL);
 
+    // 重排线程在Ready Queue/Wait List队列中的顺序
+    if (donee->queue != NULL) {
+      list_remove(&donee->elem);
+      list_insert_ordered(donee->queue, &donee->elem, &thread_before, &grater_thread_pri);
+    }
+
+    if(donee->donated_for == NULL)
+      break;
+    donor = donee;
     donee = donee->donated_for->holder;
   }
-  return true;
 }
 
-static bool donate_pri_release(struct thread* self) {
-  ASSERT(self != NULL);
-  if (self->e_pri == self->b_pri)
-    return false;
-  else {
-    self->e_pri = self->b_pri;
-    return true;
-  }
+static bool lock_before(const struct list_elem* elem_a, const struct list_elem* elem_b, void* aux) {
+  struct lock* lock_a = list_entry(elem_a, struct lock, elem);
+  struct lock* lock_b = list_entry(elem_b, struct lock, elem);
+  return lock_a->pri >= lock_b->pri;
 }

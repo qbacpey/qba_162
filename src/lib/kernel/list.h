@@ -213,8 +213,8 @@ void list_reverse(struct list*);
   * 举例来说，如果需要使用这套系统维护线程优先级列表
   * 并且这个列表满足不变性：优先级最大的在最前面、新元素需要插到同等优先级元素的最后
   * 那么就可以将list_less_func类型的函数命名为：list_name_before
-  * 将aux命名为：grater_equal_pri
-  * 而如果是插到同等元素的最前面，那么可以将aux命名为：grater_pri
+  * 将aux命名为：grater_equal_thread_pri
+  * 而如果是插到同等元素的最前面，那么可以将aux命名为：grater_thread_pri
   * 
   */
 typedef bool list_less_func(const struct list_elem* a, const struct list_elem* b, void* aux);

@@ -282,7 +282,7 @@ static void thread_enqueue(struct thread* t) {
   if (active_sched_policy == SCHED_FIFO)
     list_push_back(&ready_list, &t->elem);
   else if (active_sched_policy == SCHED_PRIO)
-    list_insert_ordered(&ready_list, &t->elem, &thread_before, &grater_pri);
+    list_insert_ordered(&ready_list, &t->elem, &thread_before, &grater_thread_pri);
   else
     PANIC("Unimplemented scheduling policy value: %d", active_sched_policy);
 }
@@ -351,10 +351,6 @@ void thread_exit(void) {
      when it calls thread_switch_tail(). */
   intr_disable();
   list_remove(&thread_current()->allelem);
-  struct donated_record* record = NULL;
-  list_clean_each(record, &(thread_current()->donated_record_tab), elem, {
-    free(record);
-  });
   thread_current()->status = THREAD_DYING;
   schedule();
   NOT_REACHED();
@@ -726,19 +722,19 @@ static tid_t allocate_tid(void) {
 
 bool thread_before(const struct list_elem* elem_a, const struct list_elem* elem_b,
                          void* aux) {
-  bool (*grater_pri)(struct thread*, struct thread*) = aux;
+  bool (*grater_thread_pri)(struct thread*, struct thread*) = aux;
   struct thread* thread_a = list_entry(elem_a, struct thread, elem);
   struct thread* thread_b = list_entry(elem_b, struct thread, elem);
-  return grater_pri(thread_a, thread_b);
+  return grater_thread_pri(thread_a, thread_b);
 }
 
 /* 比较实际优先级，如果a更大返回true */
-bool grater_pri(struct thread* thread_a, struct thread* thread_b) {
+bool grater_thread_pri(struct thread* thread_a, struct thread* thread_b) {
   return thread_a->e_pri > thread_b->e_pri;
 }
 
 /* 比较实际优先级，如果a大于或等于b返回true */
-bool grater_equal_pri(struct thread* thread_a, struct thread* thread_b) {
+bool grater_equal_thread_pri(struct thread* thread_a, struct thread* thread_b) {
   return thread_a->e_pri >= thread_b->e_pri;
 }
 

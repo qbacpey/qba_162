@@ -6,8 +6,8 @@
 
 /* A counting semaphore. */
 struct semaphore {
-  unsigned value;           /* Current value. */
-  struct list waiters;      /* List of waiting threads. */
+  unsigned value;      /* Current value. */
+  struct list waiters; /* List of waiting threads. */
 };
 
 void sema_init(struct semaphore*, unsigned value);
@@ -23,9 +23,12 @@ void sema_self_test(void);
     */
 struct lock {
   struct thread* holder;      /* Thread holding lock (for debugging). */
-  int8_t state;              // 当前锁的状态，3种状态仿照Linux2中内核锁实现
+  int8_t state;               // 当前锁的状态，3种状态仿照Linux2中内核锁实现
   struct semaphore semaphore; /* Binary semaphore controlling access. */
+  int8_t pri;                 // 释放锁的时候需要恢复为此优先级
+  struct list_elem elem; // 如果锁被某一个线程获取，那么它位于线程的donated_record_tab中
 };
+
 void lock_init(struct lock*);
 void lock_acquire(struct lock*);
 bool lock_try_acquire(struct lock*);

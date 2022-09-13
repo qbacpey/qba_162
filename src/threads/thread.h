@@ -22,12 +22,6 @@ enum thread_status {
   THREAD_DYING    /* About to be destroyed. */
 };
 
-struct donated_record {
-  struct lock* old_donated_for; // 锁，用于比较
-  int8_t pri;                   // 释放锁的时候需要恢复为此优先级
-  struct list_elem elem;
-};
-
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
 typedef int tid_t;
@@ -127,7 +121,7 @@ struct thread {
   int8_t e_pri;               // 线程的实际优先级
 
   /* Shared between thread.c / synch.c. / timer.c */
-  struct list* queue;    /* 当前位于什么队列中 */
+  struct list* queue;    /* 当前位于什么队列中（如果是timer的话值为NULL） */
   struct list_elem elem; /* List element. */
 
 // 这里好像可以定义 PCB
@@ -193,7 +187,7 @@ int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
 
 bool thread_before(const struct list_elem*, const struct list_elem*, void* aux);
-bool grater_pri(struct thread*, struct thread*);
-bool grater_equal_pri(struct thread*, struct thread*);
+bool grater_thread_pri(struct thread*, struct thread*);
+bool grater_equal_thread_pri(struct thread*, struct thread*);
 
 #endif /* threads/thread.h */
