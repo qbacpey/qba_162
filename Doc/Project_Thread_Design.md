@@ -695,7 +695,7 @@ struct thread {
 
 作用主要是创建线程，工作可概括如下：
 
-- 创建线程的时候需要将自己的TCB添加到进程的线程列表（`pcb->threads`）中，主线程也不可例外；
+- 创建线程的时候需要将自己的TCB添加到进程的线程列表（`pcb->threads`）中，主线程不在其中；
 - 直接在TCB中加一个`struct list_elem prog_elem`字段，不单独为线程列表元素包装东西了；
 
 - 初始化的时候将`joined_by`、`joining`设置为`NULL`；

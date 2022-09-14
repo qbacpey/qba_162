@@ -19,7 +19,8 @@ enum thread_status {
   THREAD_RUNNING, /* Running thread. */
   THREAD_READY,   /* Not running but ready to run. */
   THREAD_BLOCKED, /* Waiting for an event to trigger. */
-  THREAD_DYING    /* About to be destroyed. */
+  THREAD_DYING,   /* About to be destroyed. */
+  THREAD_ZOMBIE   /* 线程已结束，但尚未被join，需要回收TCB */
 };
 
 /* Thread identifier type.
@@ -113,7 +114,7 @@ struct thread {
 
   int64_t wake_up; // 需要在什么时候醒来
 
-  /* Strict Priority Scheduler相关 */
+  /* Strict Priority Scheduler 相关 */
   struct rw_lock lock;      // 修改TCB之前需要获取此锁
   struct lock* donated_for; // 线程最近一次接收优先级捐献由哪一个锁诱发？
   struct list lock_queue;   // 线程当前持有的锁的队列，按锁的优先级进行排列
@@ -124,11 +125,15 @@ struct thread {
   struct list* queue;    /* 当前位于什么队列中（如果是timer的话值为NULL） */
   struct list_elem elem; /* List element. */
 
-// 这里好像可以定义 PCB
+  bool in_handler; /* 表示当前线程是否位于内核环境中（禁用中断） */
 #ifdef USERPROG
   /* Owned by process.c. */
-  struct process* pcb; /* Process control block if this thread is a userprog */
+  struct process* pcb;        /* Process control block if this thread is a userprog */
+  struct list_elem prog_elem; /* 进程线程列表元素 */
+  struct thread* joined_by;   /* 指向join当前线程的TCB */
+  struct thread* joining;     /* 指向当前线程正在join的线程的TCB */
 #endif
+  struct rw_lock tcb_lock; /* TCB中非列表字段的锁 */
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */

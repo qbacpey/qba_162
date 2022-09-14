@@ -22,13 +22,6 @@
 #include "threads/vaddr.h"
 #include "userprog/filesys_lock.h"
 
-struct semaphore* filesys_sema = NULL; /* 定义全局临时文件系统锁 */
-// static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
-static thread_func start_process NO_RETURN;
-static thread_func start_pthread NO_RETURN;
-static bool load(const char* file_name, void (**eip)(void), void** esp);
-bool setup_thread(void (**eip)(void), void** esp);
-
 /* 用于在父子用户进程之间传递参数的 */
 struct init_pcb {
   struct process* parent;
@@ -37,6 +30,14 @@ struct init_pcb {
   char* cmd_line;
   bool processed; /* 是否处理过 cmd_line*/
 };
+
+struct semaphore* filesys_sema = NULL; /* 定义全局临时文件系统锁 */
+// static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
+static thread_func start_process NO_RETURN;
+static thread_func start_pthread NO_RETURN;
+static bool load(const char* file_name, void (**eip)(void), void** esp);
+static void init_process(struct process* new_pcb, struct init_pcb* init_pcb);
+bool setup_thread(void (**eip)(void), void** esp);
 
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
@@ -96,9 +97,9 @@ void userprog_init(void) {
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.
-  （这个说法实际上有点迷糊，它实际上指的是parent process 执行完 thread_create 之后，
-   函数返回之前新线程有可能会被立即执行，
-   并不是指代新线程会在此函数执行的任意位置都有可能被执行）  
+  这个说法实际上有点迷糊，它实际上指的是parent process 执行完 thread_create 之后，
+   process_execute返回之前新线程有可能会被立即执行，
+   并不是指代新线程会在process_execute执行的任意位置都有可能被执行
    
    Returns the new process's
    process id, or TID_ERROR if the thread cannot be created. 
@@ -210,38 +211,7 @@ static void start_process(void* init_pcb_) {
   }
 
   /* 初始化PCB */
-  // Ensure that timer_interrupt() -> schedule() -> process_activate()
-  // does not try to activate our uninitialized pagedir
-  new_pcb->pagedir = NULL;
-  t->pcb = new_pcb;
-  new_pcb->parent = init_pcb->parent;
-
-  // 初始化文件描述符表
-  list_init(&(new_pcb->files_tab));
-  lock_init(&new_pcb->files_lock);
-  new_pcb->files_next_desc = 3;
-  new_pcb->filesys_sema = NULL;
-
-  // 初始化子进程表
-  new_pcb->self = self;
-  list_init(&(new_pcb->children));
-  new_pcb->editing = editing;
-  lock_init(&(new_pcb->children_lock));
-
-  // 初始化线程表
-  // list_init ( &(new_pcb->threads) );
-
-  // 初始化进程锁列表
-  rw_lock_init(&new_pcb->locks_lock);
-  list_init(&(new_pcb->locks_tab));
-
-  // 初始化进程信号量列表
-  rw_lock_init(&new_pcb->semas_lock);
-  list_init(&(new_pcb->semas_tab));
-
-  // Continue initializing the PCB as normal
-  new_pcb->main_thread = t;
-  strlcpy(new_pcb->process_name, t->name, sizeof t->name);
+  init_process(new_pcb, init_pcb);
 
   /* Initialize interrupt frame and load executable. */
 
@@ -567,15 +537,11 @@ void process_exit(int exit_code) {
 
   // 释放进程锁列表
   struct registered_lock* lock_pos = NULL;
-  list_clean_each(lock_pos, &(pcb_to_free->locks_tab), elem, {
-    free(lock_pos);
-  });
+  list_clean_each(lock_pos, &(pcb_to_free->locks_tab), elem, { free(lock_pos); });
 
   // 释放进程信号量列表
   struct registered_lock* sema_pos = NULL;
-  list_clean_each(sema_pos, &(pcb_to_free->semas_tab), elem, {
-    free(sema_pos);
-  });
+  list_clean_each(sema_pos, &(pcb_to_free->semas_tab), elem, { free(sema_pos); });
 
   /* 释放子进程表 */
   struct child_process* child = NULL;
@@ -593,6 +559,8 @@ void process_exit(int exit_code) {
       sema_up(child_editing);
     }
   });
+
+  // TODO 线程资源释放
 
   /* 资源全部释放 */
   cur->pcb = NULL;
@@ -966,6 +934,7 @@ pid_t get_pid(struct process* p) { return (pid_t)p->main_thread->tid; }
    pointer into *ESP. Handles all cleanup if unsuccessful. Returns
    true if successful, false otherwise.
 
+
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. You may find it necessary to change the
    function signature. */
@@ -976,6 +945,19 @@ bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; 
    scheduled (and may even exit) before pthread_execute () returns.
    Returns the new thread's TID or TID_ERROR if the thread cannot
    be created properly.
+
+   整个用户线程创建的函数调用过程可归结如下：
+   1.创建者的执行序列：
+      1.sys_pthread_create：系统调用
+      2.pthread_execute：作用类似于process_execute
+          1.将新线程的TCB放入PCB列表中；
+          2.配置PCB中的各种字段；
+          3.调用thread_create，参数是start_pthread；
+   2.被创建者的执行序列：
+      1.start_pthread：作用类似于start_process
+        1.需要调用install_page申请用户栈空间；
+        2.需要仿照start_process配置用户栈空间，调用_pthread_start_stub；
+      2._pthread_start_stub：用户函数桩（此时已经位于用户内核）；
 
    This function will be implemented in Project 2: Multithreading and
    should be similar to process_execute (). For now, it does nothing.
@@ -1034,4 +1016,49 @@ static bool put_user(uint8_t* udst, uint8_t byte) {
   int error_code;
   asm("movl $1f, %0; movb %b2, %1; 1:" : "=&a"(error_code), "=m"(*udst) : "q"(byte));
   return error_code != -1;
+}
+
+/**
+ * @brief 初始化PCB
+ * 
+ * @param new_pcb 新分配的PCB，不可以是NULL
+ * @param init_pcb 传递给process_cress的参数
+ */
+static void init_process(struct process* new_pcb, struct init_pcb* init_pcb) {
+  // Ensure that timer_interrupt() -> schedule() -> process_activate()
+  // does not try to activate our uninitialized pagedir
+  new_pcb->pagedir = NULL;
+  thread_current()->pcb = new_pcb;
+  new_pcb->parent = init_pcb->parent;
+
+  // 初始化文件描述符表
+  list_init(&(new_pcb->files_tab));
+  lock_init(&new_pcb->files_lock);
+  new_pcb->files_next_desc = 3;
+  new_pcb->filesys_sema = NULL;
+
+  // 初始化子进程表
+  new_pcb->self = init_pcb->self;
+  list_init(&(new_pcb->children));
+  new_pcb->editing = init_pcb->editing;
+  lock_init(&(new_pcb->children_lock));
+
+  // 初始化进程锁列表
+  rw_lock_init(&new_pcb->locks_lock);
+  list_init(&(new_pcb->locks_tab));
+
+  // 初始化进程信号量列表
+  rw_lock_init(&new_pcb->semas_lock);
+  list_init(&(new_pcb->semas_tab));
+
+  // 初始化线程系统相关字段
+  list_init(&(new_pcb->threads));
+  lock_init(&(new_pcb->pcb_lock));
+  new_pcb->exiting = false;
+  new_pcb->thread_exiting = NULL;
+  new_pcb->pending_thread = 0;
+
+  // Continue initializing the PCB as normal
+  new_pcb->main_thread = thread_current();
+  strlcpy(new_pcb->process_name, thread_current()->name, sizeof thread_current()->name);
 }

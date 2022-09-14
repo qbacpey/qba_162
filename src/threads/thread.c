@@ -239,7 +239,6 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
    * 
    * */
   thread_unblock(t);
-// TODO
   if(thread_get_priority() < priority) {
     thread_yield();
   }
@@ -535,6 +534,8 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   strlcpy(t->name, name, sizeof t->name);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
   t->pcb = NULL;
+  t->joined_by = NULL;
+  t->joining = NULL;
   t->magic = THREAD_MAGIC;
 
   rw_lock_init(&(t->lock));

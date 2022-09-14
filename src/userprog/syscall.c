@@ -30,9 +30,10 @@ static int handler_tell(uint32_t* args, struct process* pcb);
 static double handler_compute_e(uint32_t* args, struct process* pcb);
 
 /* Poj2 system call */
-static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
-static void handler_pthread_exit(void) NO_RETURN;
-static tid_t handler_pthread_join(tid_t tid);
+static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg,
+                                    struct process* pcb);
+static void handler_pthread_exit(struct process* pcb) NO_RETURN;
+static tid_t handler_pthread_join(tid_t tid, struct process* pcb);
 static bool handler_lock_init(lock_t* lock, struct process* pcb);
 static bool handler_lock_acquire(lock_t* lock, struct process* pcb);
 static bool handler_lock_release(lock_t* lock, struct process* pcb);
@@ -184,6 +185,21 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       if (beneath) {
         f->eax = beneath ? handler_compute_e(args, pcb) : -1;
       }
+      break;
+
+    case SYS_PT_CREATE:
+      beneath = check_boundary(args + 2) && check_boundary(args + 3);
+      if (beneath) {
+        f->eax = beneath ? handler_pthread_create(args[1], args[2], args[3], pcb) : TID_ERROR;
+      }
+      break;
+
+    case SYS_PT_EXIT:
+      handler_pthread_exit(pcb);
+      break;
+
+    case SYS_PT_JOIN:
+      f->eax = handler_pthread_join((tid_t)args[1], pcb);
       break;
 
     case SYS_LOCK_INIT:
@@ -491,6 +507,18 @@ static int handler_write(uint32_t* args, struct process* pcb) {
   return off;
 }
 
+static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg,
+                                    struct process* pcb) {
+  struct thread* new_tcb = NULL;
+  malloc(new_tcb);
+  if(new_tcb == NULL){
+    return TID_ERROR;
+  }
+}
+
+static void handler_pthread_exit(struct process* pcb) {}
+static tid_t handler_pthread_join(tid_t tid, struct process* pcb) {}
+
 /**
  * @brief 将锁注册到内核空间
  * 
@@ -590,7 +618,7 @@ static bool handler_lock_release(lock_t* lock, struct process* pcb) {
   return true;
 }
 
-static bool handler_sema_init(sema_t* sema,unsigned int val, struct process* pcb) {
+static bool handler_sema_init(sema_t* sema, unsigned int val, struct process* pcb) {
   struct rw_lock* semas_lock = &(pcb->semas_lock);
   struct list* semas_tab = &(pcb->semas_tab);
   rw_lock_acquire(semas_lock, RW_WRITER);
@@ -664,6 +692,7 @@ static bool handler_sema_up(sema_t* sema, struct process* pcb) {
   sema_up(&(sema_pos->sema));
   return true;
 }
+
 
 static inline bool check_fd(uint32_t fd, struct process* pcb) { return pcb->files_next_desc >= fd; }
 static inline bool check_buffer(void* buffer, uint32_t size) {
