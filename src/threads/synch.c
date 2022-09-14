@@ -187,6 +187,7 @@ void lock_acquire(struct lock* lock) {
   enum intr_level old_level = intr_disable();
   if (--lock->state < 0) {
     if (t->e_pri > lock->pri){
+      // 无论自身优先级如何，必须先设置自己的捐献对象
       t->donated_for = lock;
       donate_pri_acquire(t, lock);
     }
@@ -200,7 +201,7 @@ void lock_acquire(struct lock* lock) {
   lock->pri = t->e_pri;
   lock->holder = t;
   t->donated_for = NULL;
-  list_insert_ordered(&t->donated_record_tab, &lock->elem, &lock_before, NULL);
+  list_insert_ordered(&t->lock_queue, &lock->elem, &lock_before, NULL);
   intr_set_level(old_level);
 }
 
@@ -223,7 +224,7 @@ bool lock_try_acquire(struct lock* lock) {
     lock->state--;
     lock->pri = t->e_pri;
     lock->holder = t;
-    list_insert_ordered(&t->donated_record_tab, &lock->elem, &lock_before, NULL);
+    list_insert_ordered(&t->lock_queue, &lock->elem, &lock_before, NULL);
     lock->holder = thread_current();
   }
   intr_set_level(old_level);
@@ -246,10 +247,10 @@ void lock_release(struct lock* lock) {
     lock->pri = 0;
 
     list_remove(&lock->elem);
-    if (list_empty(&t->donated_record_tab))
+    if (list_empty(&t->lock_queue))
       t->e_pri = t->b_pri;
     else
-      t->e_pri = list_entry(list_begin(&t->donated_record_tab), struct lock, elem)->pri;
+      t->e_pri = list_entry(list_begin(&t->lock_queue), struct lock, elem)->pri;
 
     if (++lock->state < 1)
       sema_up(&lock->semaphore);
@@ -439,19 +440,16 @@ static void donate_pri_acquire(struct thread* self, struct lock* lock) {
   struct thread* donor = self;
   ASSERT(donee != NULL);
   ASSERT(donor != NULL);
+  struct lock* record = NULL;
   while (donor->e_pri > donee->e_pri) {
     // 只有是针对不同资源的优先级捐献才触发捐献历史保存
-    struct lock* record = NULL;
-    list_for_each_entry(record, &(donee->donated_record_tab), elem) {
-      if (record == donor->donated_for)
-        break; // 找到对应锁的回复记录
-    }
+    record = donor->donated_for;
     donee->e_pri = donor->e_pri;
     record->pri = donor->e_pri;
 
     // 重排锁在资源队列中的顺序
     list_remove(&record->elem);
-    list_insert_ordered(&donee->donated_record_tab, &record->elem, &lock_before, NULL);
+    list_insert_ordered(&donee->lock_queue, &record->elem, &lock_before, NULL);
 
     // 重排线程在Ready Queue/Wait List队列中的顺序
     if (donee->queue != NULL) {

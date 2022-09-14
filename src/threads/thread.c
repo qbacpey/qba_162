@@ -392,7 +392,7 @@ void thread_foreach(thread_action_func* func, void* aux) {
  * 
  * 设置b_pri只有满足以下两个条件的时候才设置e_pri：
  * 1.new_priority大于e_pri
- * 2.donated_record_tab为空，当前线程未持有任何锁
+ * 2.lock_queue为空，当前线程未持有任何锁
  * 
  * 使用list_empty作为判断依据主要是考虑到可能有和当前线程优先级相同的
  * 线程想要获取当前线程持有的锁，因此就算在当前线程持有锁之后，b_pri也依旧等于e_pri
@@ -410,7 +410,7 @@ void thread_set_priority(int new_priority) {
   DISABLE_INTR({
     if (new_priority > t->e_pri) {
       t->e_pri = new_priority;
-    } else if (list_empty(&t->donated_record_tab)) {
+    } else if (list_empty(&t->lock_queue)) {
       t->e_pri = new_priority;
       flag = true;
     }
@@ -539,7 +539,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
 
   rw_lock_init(&(t->lock));
   t->donated_for = NULL;
-  list_init(&t->donated_record_tab);
+  list_init(&t->lock_queue);
   t->b_pri = priority;
   t->e_pri = priority;
 
@@ -590,7 +590,7 @@ static struct thread* thread_schedule_fifo(void) {
     return idle_thread;
 }
 
-/* TODO Strict priority scheduler */
+/* Strict priority scheduler */
 static struct thread* thread_schedule_prio(void) {
   if (!list_empty(&ready_list))
     return list_entry(list_pop_front(&ready_list), struct thread, elem);
