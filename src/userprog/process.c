@@ -21,6 +21,7 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/filesys_lock.h"
+#include "bitmap.h"
 
 /* 用于在父子用户进程之间传递参数的 */
 struct init_pcb {
@@ -33,9 +34,10 @@ struct init_pcb {
 
 /* pthread_create/start_thread 之间传递参数 */
 struct init_tcb {
-  stub_fun sf; 
-  pthread_fun tf; 
+  stub_fun sf;
+  pthread_fun tf;
   void* arg;
+  size_t stack_no; /* 由pthread_execute分配的栈编号 */
 };
 
 struct semaphore* filesys_sema = NULL; /* 定义全局临时文件系统锁 */
@@ -44,8 +46,9 @@ static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 static void init_process(struct process* new_pcb, struct init_pcb* init_pcb);
-static uint8_t inline stack_no(uint8_t* stack);
-bool setup_thread(void (**eip)(void), void** esp);
+inline static size_t stack_no(uint8_t* stack);
+static void starting_when_exiting(struct process* pcb) NO_RETURN;
+bool setup_thread(void (**eip)(void), void** esp, struct init_tcb* init_tcb);
 
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
@@ -172,7 +175,7 @@ pid_t process_execute(const char* file_name) {
 
   /* file_name的第一个空格设置为\0 拷贝系统调用参数到内核 */
   strlcpy(fn_copy, file_name, PGSIZE);
-  char *token, *save_ptr;
+  char *save_ptr;
   fn_copy = strtok_r(fn_copy, " ", &save_ptr);
   /* 与start_process协作，用于标识是否对文件名字符串进行了替换 */
   if (strlen(fn_copy) != strlen(file_name)) {
@@ -210,7 +213,7 @@ static void start_process(void* init_pcb_) {
   char* file_name = init_pcb->cmd_line;
   struct thread* t = thread_current();
   struct intr_frame if_;
-  bool success, pcb_success;
+  bool success;
 
   /* 分配PCB空间 */
   struct process* new_pcb = malloc(sizeof(struct process));
@@ -244,6 +247,11 @@ static void start_process(void* init_pcb_) {
     free_parent_self(self, -1);
     goto done;
   }
+
+  /* 初始化虚拟内存空间栈相关字段 */
+  new_pcb->stacks = bitmap_create(MAX_THREADS);
+  ASSERT(new_pcb->stacks != NULL);
+  bitmap_set(new_pcb->stacks, 0, true);
 
   /* 需要确保if_中的状态是FPU的初始状态 */
   asm("fninit; fsave (%0)" : : "g"(&if_.fpu_state));
@@ -336,7 +344,7 @@ static void start_process(void* init_pcb_) {
   /* 设置 argc */
   *(uint32_t*)if_.esp = argc;
 
-  /* 伪装返回值 */
+  /* 伪装返回地址 */
   if_.esp -= 0x4;
 
 done:
@@ -347,6 +355,7 @@ done:
     // sema_up(&temporary);
     /* 如果是exited==false 但是exited_code=-1就说明PCB初始化错误 */
     self->exited = false;
+    bitmap_destroy(new_pcb->stacks);
     sema_up(editing);
     thread_exit();
     NOT_REACHED();
@@ -460,6 +469,10 @@ int process_wait(pid_t child_pid) {
 
 /* Free the current process's resources. 
  * 
+ * 其实如果是用户线程退出的话，可以提升自己优先级
+ * 从而防止其他派生的线程继续执行，但这种行为有依赖调度器
+ * 实现的嫌疑，还是作为辅助手段吧
+ * 
  * 现列出需要额外释放的资源：
  * 1.进程文件描述符表
  * 
@@ -491,6 +504,10 @@ int process_wait(pid_t child_pid) {
  * 
  */
 void process_exit(int exit_code) {
+
+  // 将自己的优先级设置为系统最大值
+  thread_set_priority(PRI_MAX);
+
   struct thread* cur = thread_current();
   uint32_t* pd;
 
@@ -570,6 +587,7 @@ void process_exit(int exit_code) {
   });
 
   // TODO 线程资源释放
+  bitmap_destroy(pcb_to_free->stacks);
 
   /* 资源全部释放 */
   cur->pcb = NULL;
@@ -685,7 +703,7 @@ struct Elf32_Phdr {
 #define PF_W 2 /* Writable. */
 #define PF_R 4 /* Readable. */
 
-static bool setup_stack(void** esp);
+static bool setup_stack(void** esp, void* top);
 static bool validate_segment(const struct Elf32_Phdr*, struct file*);
 static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable);
@@ -778,16 +796,12 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   }
 
   /* Set up stack. */
-  if (!setup_stack(esp))
+  if (!setup_stack(esp, PHYS_BASE))
     goto done;
-
   /* Start address. */
   *eip = (void (*)(void))ehdr.e_entry;
-
   // 这里是不是应该调用 setup_thread ?
-
   success = true;
-
 done:
   /* We arrive here whether the load is successful or not. */
   if (!success) {
@@ -897,20 +911,31 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
   return true;
 }
 
-/* Create a minimal stack by mapping a zeroed page at the top of
-   user virtual memory. */
-static bool setup_stack(void** esp) {
+/* Create a minimal stack by mapping a zeroed page begin from 
+   the TOP of user virtual memory. */
+static bool setup_stack(void** esp, void* top) {
   uint8_t* kpage;
   bool success = false;
 
+  enum intr_level old_level = intr_disable();
+#ifdef USERPROG
+  if (thread_current()->pcb->exiting) {
+    goto done;
+  }
+#endif
   kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage != NULL) {
-    success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
+    success = install_page(((uint8_t*)top) - PGSIZE, kpage, true);
     if (success)
-      *esp = PHYS_BASE;
+      *esp = top;
     else
       palloc_free_page(kpage);
   }
+#ifdef USERPROG
+done:
+#endif
+  intr_set_level(old_level);
+
   return success;
 }
 
@@ -938,17 +963,6 @@ bool is_main_thread(struct thread* t, struct process* p) { return p->main_thread
 /* Gets the PID of a process */
 pid_t get_pid(struct process* p) { return (pid_t)p->main_thread->tid; }
 
-/* Creates a new stack for the thread and sets up its arguments.
-   Stores the thread's entry point into *EIP and its initial stack
-   pointer into *ESP. Handles all cleanup if unsuccessful. Returns
-   true if successful, false otherwise.
-
-
-   This function will be implemented in Project 2: Multithreading. For
-   now, it does nothing. You may find it necessary to change the
-   function signature. */
-bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; }
-
 /* Starts a new thread with a new user stack running SF, which takes
    TF and ARG as arguments on its user stack. This new thread may be
    scheduled (and may even exit) before pthread_execute () returns.
@@ -971,17 +985,29 @@ bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; 
    This function will be implemented in Project 2: Multithreading and
    should be similar to process_execute (). For now, it does nothing.
    */
-tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) { 
-  struct process *pcb = thread_current()->pcb;
-  struct init_tcb *init_tcb = NULL;
+tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
+  struct process* pcb = thread_current()->pcb;
+  struct init_tcb* init_tcb = NULL;
+
+  lock_acquire(&pcb->pcb_lock);
+  size_t stack_no = bitmap_scan_and_flip(pcb->stacks, 0, 1, false);
+  if (stack_no == BITMAP_ERROR) {
+    lock_release(&pcb->pcb_lock);
+    return TID_ERROR;
+  }
+  ASSERT(stack_no > 0);
+  lock_release(&pcb->pcb_lock);
+
   malloc_type(init_tcb);
   init_tcb->sf = sf;
   init_tcb->tf = tf;
   init_tcb->arg = arg;
-  tid_t tid =  thread_create("sub thread", PRI_DEFAULT, &start_pthread, init_tcb);
-  if(tid == TID_ERROR)
+  init_tcb->stack_no = stack_no;
+
+  tid_t tid = thread_create("sub thread", PRI_DEFAULT, &start_pthread, init_tcb);
+  if (tid == TID_ERROR)
     free(init_tcb);
-  return tid; 
+  return tid;
 }
 
 /* A thread function that creates a new user thread and starts it
@@ -990,9 +1016,90 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
 
    This function will be implemented in Project 2: Multithreading and
    should be similar to start_process (). For now, it does nothing. */
-static void start_pthread(void* exec_) { 
+static void start_pthread(void* exec_) {
   struct init_tcb* init_tcb = (struct init_tcb*)exec_;
+  struct thread* t = thread_current();
+  struct process* pcb = t->pcb;
+  struct intr_frame if_;
 
+  lock_acquire(&t->tcb_lock);
+  t->stack_no = init_tcb->stack_no;
+  t->joined_by = NULL;
+  t->joining = NULL;
+  lock_release(&t->tcb_lock);
+
+  bool success = false;
+  memset(&if_, 0, sizeof if_);
+  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+  if_.cs = SEL_UCSEG;
+  if_.eflags = FLAG_IF | FLAG_MBS;
+  success = setup_thread(&if_.eip, &if_.esp, init_tcb);
+  free(init_tcb);
+  if (!success)
+    starting_when_exiting(pcb);
+
+  bool is_process_exiting = false;
+  // 禁用中断主要是为了防止被中断处理程序触发的exit(-1)影响
+  DISABLE_INTR({
+    if (pcb->exiting)
+      is_process_exiting = true;
+    else
+      list_push_front(&pcb->threads, &t->prog_elem);
+  });
+
+  /* 通过判断现在进程是不是在退出，决定是跳到用户空间还是继续执行
+     因为使用了install_page将用户栈注册到进程页目录中，因此无需
+     额外释放用户栈，process_exit执行时候会释放此线程用户栈 */
+  if (is_process_exiting)
+    starting_when_exiting(pcb);
+
+  asm volatile(" movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
+
+  NOT_REACHED();
+}
+/**
+ * @brief 执行如果线程执行start_pthread的时候
+ * 进程正在退出的相关清理逻辑
+ * 
+ * @param pcb 
+ */
+static void starting_when_exiting(struct process* pcb) {
+  lock_acquire(&pcb->pcb_lock);
+  pcb->pending_thread--;
+  if (pcb->pending_thread == 0)
+    free(pcb);
+  else
+    lock_release(&pcb->pcb_lock);
+  thread_exit();
+  NOT_REACHED();
+}
+
+/* Creates a new stack for the thread and sets up its arguments.
+   Stores the thread's entry point into *EIP and its initial stack
+   pointer into *ESP. Handles all cleanup if unsuccessful. Returns
+   true if successful, false otherwise.
+
+   这个函数只有在一种情况下能够失败：进程执行exit之后此线程再被调度执行
+   至于真正的Page Fault问题和进程虚拟内存空间用完的问题，由thread_extute处理
+
+   This function will be implemented in Project 2: Multithreading. For
+   now, it does nothing. You may find it necessary to change the
+   function signature. */
+bool setup_thread(void (**eip)(void), void** esp, struct init_tcb* init_tcb) {
+  bool success = false;
+  /* Set up stack. */
+  if (!setup_stack(esp, PHYS_BASE - init_tcb->stack_no * STACK_SIZE))
+    goto done;
+  *eip = init_tcb->sf;
+
+  *esp -= 0x10;
+  *((uint32_t*)(*esp) + 1) = init_tcb->arg;
+  *(uint32_t*)(*esp) = init_tcb->tf;
+  *esp -= 0x4;
+
+  success = true;
+done:
+  return success;
 }
 
 /* Waits for thread with TID to die, if that thread was spawned
@@ -1062,7 +1169,7 @@ static bool put_user(uint8_t* udst, uint8_t byte) {
  * @param stack 栈不能为空
  * @return uint8_t 
  */
-static uint8_t inline stack_no(uint8_t* stack) {
+inline static size_t stack_no(uint8_t* stack) {
   return ~(((uint32_t)stack ^ 0x80000000) >> 23) ^ 0x80;
 }
 

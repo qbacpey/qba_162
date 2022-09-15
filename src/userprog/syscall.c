@@ -30,7 +30,8 @@ static int handler_tell(uint32_t* args, struct process* pcb);
 static double handler_compute_e(uint32_t* args, struct process* pcb);
 
 /* Poj2 system call */
-static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
+static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, void* arg,
+                                    struct process* pcb);
 static void handler_pthread_exit(struct process* pcb) NO_RETURN;
 static tid_t handler_pthread_join(tid_t tid, struct process* pcb);
 static bool handler_lock_init(lock_t* lock, struct process* pcb);
@@ -73,6 +74,10 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   // printf("System call number: %d\n", args[0]);
   bool beneath = true;
   f->eax = -1;
+  // 就算exit(-1)在此间插入也没有关系，系统调用最后的逻辑可以处理
+  lock_acquire(&pcb->pcb_lock);
+  pcb->pending_thread++;
+  lock_release(&pcb->pcb_lock);
 
   switch (args[0]) {
 
@@ -189,7 +194,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     case SYS_PT_CREATE:
       beneath = check_boundary(args + 2) && check_boundary(args + 3);
       if (beneath) {
-        f->eax = beneath ? handler_pthread_create(args[1], args[2], args[3]) : TID_ERROR;
+        f->eax = beneath ? handler_pthread_create((stub_fun)args[1], (pthread_fun)args[2],
+                                                  (void*)args[3], pcb)
+                         : TID_ERROR;
       }
       break;
 
@@ -251,6 +258,18 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     printf("%s: exit(%d)\n", pcb->process_name, f->eax);
     process_exit(f->eax);
   }
+
+  lock_acquire(&pcb->pcb_lock);
+  pcb->pending_thread--;
+  lock_release(&pcb->pcb_lock);
+
+  DISABLE_INTR({
+    if (pcb->exiting) {
+      if (pcb->pending_thread == 0)
+        free(pcb);
+      thread_exit();
+    }
+  });
 }
 
 static int handler_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
@@ -313,7 +332,6 @@ static bool handler_create(uint32_t* args, struct process* pcb) {
 
 static bool handler_remove(uint32_t* args, struct process* pcb) {
   bool result = false;
-
   sema_down(filesys_sema);
   pcb->filesys_sema = filesys_sema;
   result = filesys_remove((char*)args[1]);
@@ -506,8 +524,20 @@ static int handler_write(uint32_t* args, struct process* pcb) {
   return off;
 }
 
-static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg) {
-  return pthread_execute(sfun, tfun, arg);
+static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, void* arg,
+                                    struct process* pcb) {
+  lock_acquire(&pcb->pcb_lock);
+  pcb->pending_thread++;
+  lock_release(&pcb->pcb_lock);
+
+  tid_t tid = pthread_execute(sfun, tfun, arg);
+  if (tid == TID_ERROR) {
+    lock_acquire(&pcb->pcb_lock);
+    pcb->pending_thread--;
+    lock_release(&pcb->pcb_lock);
+  }
+
+  return tid;
 }
 
 static void handler_pthread_exit(struct process* pcb) {}
@@ -686,7 +716,6 @@ static bool handler_sema_up(sema_t* sema, struct process* pcb) {
   sema_up(&(sema_pos->sema));
   return true;
 }
-
 
 static inline bool check_fd(uint32_t fd, struct process* pcb) { return pcb->files_next_desc >= fd; }
 static inline bool check_buffer(void* buffer, uint32_t size) {

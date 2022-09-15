@@ -182,6 +182,16 @@ void thread_print_stats(void) {
    scheduled.  Use a semaphore or some other form of
    synchronization if you need to ensure ordering.
 
+   如果在某个线程调用thread_create的时候，其他线程调用exit退出进程
+   也不用担心新创建线程的TCB没有被释放，这是因为：
+   1.pthread_create系统调用执行的时候，会将PCB中的 pending_thread +=2而不是++
+     自己退出的时候会将其--而不是-=2，剩下多的一点由start_thread执行
+   2.exit执行的时候是否释放PCB取决于pending_thread是否为0，更确切地讲
+     每一个线程退出的时候都需要检查PCB的exiting
+     如果是true那么递减pending_thread之后执行thread_exit
+     如果这个数递减之后变为0，那么需要释放PCB
+  因此在start_thread中再将当前线程加入PCB的线程列表也可以
+
    The code provided sets the new thread's `priority' member to
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
@@ -532,17 +542,15 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   memset(t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
+  lock_init(&t->tcb_lock);
+  cond_init(&t->tcb_condition);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
 #ifdef USERPROG
-  struct process* pcb = thread_current()->pcb;
-  t->pcb = pcb;
-  t->joined_by = NULL;
-  t->joining = NULL;
-  list_push_front(&pcb->threads, &t->prog_elem);
+  t->pcb = thread_current()->pcb;
+  t->stack_no = -1;
 #endif
   t->magic = THREAD_MAGIC;
 
-  rw_lock_init(&(t->lock));
   t->donated_for = NULL;
   list_init(&t->lock_queue);
   t->b_pri = priority;
