@@ -8,7 +8,10 @@
 // At most 8MB can be allocated to the stack
 // These defines will be used in Project 2: Multithreading
 #define MAX_STACK_PAGES (1 << 11)
+#define STACK_SIZE (1 << 23)
 #define MAX_THREADS 127
+// MAX_THREAD 以 BYTE 为单位的大小
+#define STACK_BYTE ((MAX_THREADS + 1) / sizeof(uint8_t))
 
 /* PIDs and TIDs are the same type. PID should be
    the TID of the main thread of the process */
@@ -175,11 +178,12 @@ struct process {
   struct list semas_tab;     /* 进程用户空间信号量列表 */
 
   // 线程系统相关
-  struct lock pcb_lock;          /* PCB中非列表字段的锁 */
-  struct list threads;           /* 元素是TCB */
-  bool exiting;                  /* 进程是否正在执行exit函数？ */
-  struct thread* thread_exiting; /* 当前是否有函数正在执行process_exit */
-  uint32_t pending_thread;       /* 当前有多少个内核线程还在执行 */
+  struct lock pcb_lock;            /* PCB中非列表字段的锁 */
+  struct list threads;             /* 元素是TCB */
+  uint8_t stack_space[STACK_BYTE]; /* 进程已经在虚拟内存空间中分配了多少个栈？（Bitmap） */
+  bool exiting;                    /* 进程是否正在执行exit函数？ */
+  struct thread* thread_exiting;   /* 当前是否有函数正在执行process_exit */
+  uint32_t pending_thread;         /* 当前有多少个内核线程还在执行 */
 
   struct thread* main_thread; /* Pointer to main thread */
 };

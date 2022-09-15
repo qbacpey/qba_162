@@ -533,9 +533,13 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
-  t->pcb = NULL;
+#ifdef USERPROG
+  struct process* pcb = thread_current()->pcb;
+  t->pcb = pcb;
   t->joined_by = NULL;
   t->joining = NULL;
+  list_push_front(&pcb->threads, &t->prog_elem);
+#endif
   t->magic = THREAD_MAGIC;
 
   rw_lock_init(&(t->lock));

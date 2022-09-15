@@ -30,8 +30,7 @@ static int handler_tell(uint32_t* args, struct process* pcb);
 static double handler_compute_e(uint32_t* args, struct process* pcb);
 
 /* Poj2 system call */
-static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg,
-                                    struct process* pcb);
+static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
 static void handler_pthread_exit(struct process* pcb) NO_RETURN;
 static tid_t handler_pthread_join(tid_t tid, struct process* pcb);
 static bool handler_lock_init(lock_t* lock, struct process* pcb);
@@ -190,7 +189,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     case SYS_PT_CREATE:
       beneath = check_boundary(args + 2) && check_boundary(args + 3);
       if (beneath) {
-        f->eax = beneath ? handler_pthread_create(args[1], args[2], args[3], pcb) : TID_ERROR;
+        f->eax = beneath ? handler_pthread_create(args[1], args[2], args[3]) : TID_ERROR;
       }
       break;
 
@@ -507,13 +506,8 @@ static int handler_write(uint32_t* args, struct process* pcb) {
   return off;
 }
 
-static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg,
-                                    struct process* pcb) {
-  struct thread* new_tcb = NULL;
-  malloc(new_tcb);
-  if(new_tcb == NULL){
-    return TID_ERROR;
-  }
+static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg) {
+  return pthread_execute(sfun, tfun, arg);
 }
 
 static void handler_pthread_exit(struct process* pcb) {}

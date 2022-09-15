@@ -31,12 +31,20 @@ struct init_pcb {
   bool processed; /* 是否处理过 cmd_line*/
 };
 
+/* pthread_create/start_thread 之间传递参数 */
+struct init_tcb {
+  stub_fun sf; 
+  pthread_fun tf; 
+  void* arg;
+};
+
 struct semaphore* filesys_sema = NULL; /* 定义全局临时文件系统锁 */
 // static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 static void init_process(struct process* new_pcb, struct init_pcb* init_pcb);
+static uint8_t inline stack_no(uint8_t* stack);
 bool setup_thread(void (**eip)(void), void** esp);
 
 /* Initializes user programs in the system by ensuring the main
@@ -68,6 +76,7 @@ void userprog_init(void) {
 
   /* 进程表相关的逻辑 */
   struct process* pcb = t->pcb;
+  list_init(&(pcb->threads));
   list_init(&(pcb->children));
 
   malloc_type(pcb->editing);
@@ -962,7 +971,18 @@ bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; 
    This function will be implemented in Project 2: Multithreading and
    should be similar to process_execute (). For now, it does nothing.
    */
-tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSED) { return -1; }
+tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) { 
+  struct process *pcb = thread_current()->pcb;
+  struct init_tcb *init_tcb = NULL;
+  malloc_type(init_tcb);
+  init_tcb->sf = sf;
+  init_tcb->tf = tf;
+  init_tcb->arg = arg;
+  tid_t tid =  thread_create("sub thread", PRI_DEFAULT, &start_pthread, init_tcb);
+  if(tid == TID_ERROR)
+    free(init_tcb);
+  return tid; 
+}
 
 /* A thread function that creates a new user thread and starts it
    running. Responsible for adding itself to the list of threads in
@@ -970,7 +990,10 @@ tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSE
 
    This function will be implemented in Project 2: Multithreading and
    should be similar to start_process (). For now, it does nothing. */
-static void start_pthread(void* exec_ UNUSED) {}
+static void start_pthread(void* exec_) { 
+  struct init_tcb* init_tcb = (struct init_tcb*)exec_;
+
+}
 
 /* Waits for thread with TID to die, if that thread was spawned
    in the same process and has not been waited on yet. Returns TID on
@@ -1016,6 +1039,31 @@ static bool put_user(uint8_t* udst, uint8_t byte) {
   int error_code;
   asm("movl $1f, %0; movb %b2, %1; 1:" : "=&a"(error_code), "=m"(*udst) : "q"(byte));
   return error_code != -1;
+}
+
+/**
+ * @brief 根据栈的指针，计算栈的虚拟地址编号
+ * 位于进程虚拟地址空间顶部的栈（主线程）的编号是0
+ * 位于它下面的栈的编号是1
+ * 以此类推，直到编号为MAX_THREADS
+ * 
+ * 1.C语言中的向左移动位运算符是会默认补位的，因此需要在 ^ 0x80000000
+ * 之后再执行左移操作
+ * 2.涉及到诸如8MB，1GB这种单位换算的时候，最好的处理方法就是将后面的单位
+ * 当成是指定大小的内存单元，如8MB就是3Bit加上2*10Bit共计23Bit大小的内存单元
+ * 自然如果想要表示以8MB为大小单位的地址，就需要在第24个Bit上做加减操作
+ * 如果某个32位地址中只有该Bit==1，那么这个地址所指示的地址单元就是
+ * 整个地址空间中的第二个大小为8MB的Chunk（第一个Chunk是全0的地址）
+ * 
+ * 说了这么多，实际上就是想要确立一种认识地址的角度：将内存单元的单位当成
+ * 拥有指定位数的内存Chunk，而将这种内存单元的个数当成是Chunk所占位数之前的
+ * Bit，通过控制这些Bit来控制Chunk的个数
+ * 
+ * @param stack 栈不能为空
+ * @return uint8_t 
+ */
+static uint8_t inline stack_no(uint8_t* stack) {
+  return ~(((uint32_t)stack ^ 0x80000000) >> 23) ^ 0x80;
 }
 
 /**
