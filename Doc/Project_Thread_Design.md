@@ -710,9 +710,9 @@ struct thread {
   - 以`in_handler`作为释放TCB的指标；
   - 不清除任何线程的资源，仅仅移出准备队列以及设置线程状态；
   - 为了和Join系统协作，需要上溯线程链并妥善处理Join链顶部线程；
-  - 迭代完之后就`THREAD_BLOCK`，等待`pending_thread==1`之后被唤醒；
+  - 迭代完之后就`THREAD_BLOCK`，等待`pending_thread==0`之后被唤醒；
 - 第二次遍历：目的是确认本进程所有线程已正常退出；
-  - 使用`pending_thread==1`和条件变量协作，不使用`join_by`；
+  - 使用`pending_thread==0`和条件变量协作，不使用`join_by`；
   - `pend_thread==1`之后再遍历列表清除剩余线程TCB；
   - 要求`exit(-1)`能直接跳到这一步，直接清除所有线程的资源；
 
@@ -723,8 +723,10 @@ struct thread {
 #### 线程创建相关函数
 
 可能对函数执行逻辑产生影响的退出事件穿插逻辑如下：
-- 线程在执行`pthread_execute`发生退出事件：
+- `pthread_execute`执行时发生退出事件：
   - 系统调用入口和出口处统一执行的`pending_thread`维护逻辑可确保无论在何处发生退出事件都不会影响线程；
+- `pthread_execute`创建线程之后，`start_pthread`执行之前发生退出事件：
+  - 由于此时`pending_thread>0`其值尚未被`start_pthread`递减，因此可类比作`start_pthread`的第一种情况；
 - 线程在执行`start_pthread`时发生退出事件：
   - 发生在`setup_stack`禁用中断之前：函数禁用中断后检查发现`exiting==false`，返回错误，线程清理资源正常退出；
   - 发生在`setup_stack`禁用中断页分配完毕之后，压入PCB线程队列之前：由于注册用户栈操作具有原子性`process_exit`可安全释放用户栈；
@@ -747,23 +749,39 @@ struct thread {
 - 调用`running_when_exiting`，执行`pending_thread`维护逻辑；
 - 一切无误时执行汇编，跳转到用户模式；
 
-#### `pthread_exit`
+#### 线程退出相关函数
 
-作用主要是线程退出，工作可概括如下：
+可能对线程退出函数执行逻辑产生影响的退出事件穿插逻辑如下：
+- 执行`pthread_exit`时发生退出事件：
+  - 无需添加额外的处理代码；
+- 执行`pthread_exit_main`时发生退出事件：
+  - 阻塞前发生退出事件：`process_exit`必然在此线程再次被调度之前阻塞，因此只需在阻塞前检查`exiting`就可以将此问题划归为普通的系统调用问题；
+  - 阻塞中发生退出事件：`process_exit`会在第一次迭代时直接将主线程状态标记为`THREAD_ZOMBIE`并将其移出等待队列。第二次迭代的时候如果他还在那么就释放其资源；
 
-- （非主线程）退出的时候将自己的状态设置为`THREAD_ZOMBIE`，同时需要唤醒`joined_by`：
-  - 全程禁用中断；
-  - 不需要将自己从线程队列中移除，但是需要将自己从Ready Queue中移除；
-  - 防止`switch_thread`的时候自己的Page被FREE掉了[^退出状态]；
-  - 要么就是让`pthread_join`自己的时候顺带将自己清理掉，要么就是让`exit`清理所有线程TCB的时候将自己清理掉；
-  - 如果自己是主线程或者执行`exit`的线程，需要将自己的状态设置为`THREAD_DYING`，让调度器代码来回收自己的资源；
+##### `pthread_exit`
 
-- 如果主线程执行`pthread_exit`，那么主线程需要join所有**活跃**线程之后再退出：
-  - 需要使用`is_main_thread`判断当前线程是否是主线程，如果是，那么需要遍历当前进程的线程列表[^主线程最后的Join是否可能引发死锁？]；
-- 如果主线程被join了，那么在主线程执行`thread_exit`之后，执行`process_exit`进程退出之前，该线程会被唤醒（使用`thread_unblock`）；
-  - 由此来看，主线程退出的时候还需要检查自己TCB中的`joined_by`，看有没有其他线程Join自己；
-  - 这一点对于普通线程也是成立的，它们退出的时候也需要检查自己的`joined_by`并唤醒它（将`joining`标记为`THREAD_READY`即可）[^死锁1]；
+普通线程的退出函数，不可调用`process_exit`退出进程：
 
+作用主要是线程退出，工作如下：
+- 退出状态为`THREAD_ZOMBIE`；
+- 无需将自己移出PCB线程队列；
+- 唤醒`joined_by`：用户栈、虚拟内存空间、TCB都由它释放[^退出状态][^死锁1]；
+- 执行`running_when_exiting`；
+
+##### `pthread_exit_main`
+
+由于join主线程的线程不会释放主线程的资源，因此在任何时候`PCB->main_thread`都是合法的
+
+主线程退出函数，基本可视为`process_exit(0)`的包装，但是允许用户代码继续执行[^主线程最后的Join是否可能引发死锁？]：
+- 唤醒自己的`joined_by`；
+- 禁用中断、递减`pending_thread`、校验`exiting`：
+  - `true`：直接退出；
+  - `false`：`thread_block`直到`pending_thread==0`；
+- 调用`process_exit(0)`；
+
+##### `process_exit`
+
+进程退出函数，详情见后`exit`系统调用部分
 ##### 遍历活跃线程
 
 遍历的时候不要修改线程表，让`thread_join`承担TCB清理工作，见到一个状态不是`THREAD_ZOMBIE`的，join它即可：
