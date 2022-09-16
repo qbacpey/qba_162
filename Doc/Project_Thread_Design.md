@@ -720,15 +720,32 @@ struct thread {
 - 线程退出的时候将自己的状态设置为`THREAD_ZOMBIE`而不是`THREAD_DYING`，同时需要`--pending_thread`；
 - 让自己现在或未来的joiner来清除自己的资源；
 ### 线程库函数
+#### 线程创建相关函数
 
-#### `pthread_create`
+可能对函数执行逻辑产生影响的退出事件穿插逻辑如下：
+- 线程在执行`pthread_execute`发生退出事件：
+  - 系统调用入口和出口处统一执行的`pending_thread`维护逻辑可确保无论在何处发生退出事件都不会影响线程；
+- 线程在执行`start_pthread`时发生退出事件：
+  - 发生在`setup_stack`禁用中断之前：函数禁用中断后检查发现`exiting==false`，返回错误，线程清理资源正常退出；
+  - 发生在`setup_stack`禁用中断页分配完毕之后，压入PCB线程队列之前：由于注册用户栈操作具有原子性`process_exit`可安全释放用户栈；
+  - 发生在压入PCB线程队列之后，`running_when_exiting`执行之前：`running_when_exiting`检查发现`exiting==false`，直接执行退出逻辑；
+  - 发生在`running_when_exiting`执行之后：此时`in_handler==false`，被`process_exit`移除准备队列并将状态标记为`THREAD_ZOMBIE`；
+##### `pthread_execute`
 
-作用主要是创建线程，工作可概括如下：
+基本可类比作`process_execute`：
 
-- 创建线程的时候需要将自己的TCB添加到进程的线程列表（`pcb->threads`）中，主线程不在其中；
-- 直接在TCB中加一个`struct list_elem prog_elem`字段，不单独为线程列表元素包装东西了；
+- 执行`bitmap_scan_and_flip`在进程页目录中占据位置，未分配实际用户栈的内存；
+- 执行`thread_create`创建子线程，未将线程TCB添加到PCB线程列表中；
+- 分配`init_tcb`，用于向`start_pthread`函数传递参数；
 
-- 初始化的时候将`joined_by`、`joining`设置为`NULL`；
+##### `start_pthread`
+
+使用`pthread_execute`创建的子线程被第一次被调度时执行的函数：
+- 释放`init_tcb`；
+- 使用`setup_thread`为用户栈分配内存页并初始化中断帧；
+- 将自己的TCB添加到PCB线程队列中；
+- 调用`running_when_exiting`，执行`pending_thread`维护逻辑；
+- 一切无误时执行汇编，跳转到用户模式；
 
 #### `pthread_exit`
 

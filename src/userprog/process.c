@@ -1023,8 +1023,10 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
   init_tcb->stack_no = stack_no;
 
   tid_t tid = thread_create("sub thread", PRI_DEFAULT, &start_pthread, init_tcb);
-  if (tid == TID_ERROR)
+  if (tid == TID_ERROR){
     free(init_tcb);
+    bitmap_scan_and_flip(pcb->stacks, stack_no, 1, false);
+  }
   return tid;
 }
 
