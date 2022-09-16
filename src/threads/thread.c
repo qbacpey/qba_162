@@ -543,10 +543,10 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
   lock_init(&t->tcb_lock);
-  cond_init(&t->tcb_condition);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
 #ifdef USERPROG
-  t->pcb = thread_current()->pcb;
+  t->pcb = NULL;
+  t->in_handler = false;
   t->stack_no = -1;
 #endif
   t->magic = THREAD_MAGIC;

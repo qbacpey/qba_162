@@ -37,6 +37,7 @@ struct init_tcb {
   stub_fun sf;
   pthread_fun tf;
   void* arg;
+  struct process* pcb;
   size_t stack_no; /* 由pthread_execute分配的栈编号 */
 };
 
@@ -47,7 +48,6 @@ static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 static void init_process(struct process* new_pcb, struct init_pcb* init_pcb);
 inline static size_t stack_no(uint8_t* stack);
-static void starting_when_exiting(struct process* pcb) NO_RETURN;
 bool setup_thread(void (**eip)(void), void** esp, struct init_tcb* init_tcb);
 
 /* Initializes user programs in the system by ensuring the main
@@ -511,17 +511,35 @@ void process_exit(int exit_code) {
   struct thread* cur = thread_current();
   uint32_t* pd;
 
-  /* If this thread does not have a PCB, don't worry
-   * 非用户进程 直接退出
-   */
+  /* If this thread does not have a PCB, don't worry */
   if (cur->pcb == NULL) {
     thread_exit();
     NOT_REACHED();
   }
 
+  struct process* pcb_to_free = cur->pcb;
+  bool is_process_exiting = false;
+
+  enum intr_level old_level = intr_disable();
+  if (pcb_to_free->exiting){
+    is_process_exiting = true;
+  }
+  else {
+    struct thread *t_pos = NULL;
+    list_clean_each(t_pos, &pcb_to_free->threads, prog_elem, {
+      if(t_pos->in_handler == false){
+        
+      }
+    });
+  }
+  intr_set_level(old_level);
+
+  if (is_process_exiting)
+    starting_when_exiting(pcb_to_free);
+
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
-  pd = cur->pcb->pagedir;
+  pd = pcb_to_free->pagedir;
   if (pd != NULL) {
     /* Correct ordering here is crucial.  We must set
          cur->pcb->pagedir to NULL before switching page directories,
@@ -530,7 +548,7 @@ void process_exit(int exit_code) {
          directory before destroying the process's page
          directory, or our active page directory will be one
          that's been freed (and cleared). */
-    cur->pcb->pagedir = NULL;
+    pcb_to_free->pagedir = NULL;
     pagedir_activate(NULL);
     pagedir_destroy(pd);
   }
@@ -540,7 +558,6 @@ void process_exit(int exit_code) {
      If this happens, then an unfortuantely timed timer interrupt
      can try to activate the pagedir, but it is now freed memory */
   /* 需要确保子进程编辑自己的PCB之前先获取父进程的锁 */
-  struct process* pcb_to_free = cur->pcb;
   struct semaphore* editing = pcb_to_free->editing;
   sema_down(editing);
   free_parent_self(pcb_to_free->self, exit_code);
@@ -1002,6 +1019,7 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
   init_tcb->sf = sf;
   init_tcb->tf = tf;
   init_tcb->arg = arg;
+  init_tcb->pcb = pcb;
   init_tcb->stack_no = stack_no;
 
   tid_t tid = thread_create("sub thread", PRI_DEFAULT, &start_pthread, init_tcb);
@@ -1019,14 +1037,18 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
 static void start_pthread(void* exec_) {
   struct init_tcb* init_tcb = (struct init_tcb*)exec_;
   struct thread* t = thread_current();
-  struct process* pcb = t->pcb;
+  struct process* pcb = NULL;
   struct intr_frame if_;
 
   lock_acquire(&t->tcb_lock);
+  t->pcb = init_tcb->pcb;
   t->stack_no = init_tcb->stack_no;
   t->joined_by = NULL;
   t->joining = NULL;
   lock_release(&t->tcb_lock);
+
+  ASSERT(t->pcb != NULL);
+  pcb = t->pcb;
 
   bool success = false;
   memset(&if_, 0, sizeof if_);
@@ -1036,23 +1058,19 @@ static void start_pthread(void* exec_) {
   success = setup_thread(&if_.eip, &if_.esp, init_tcb);
   free(init_tcb);
   if (!success)
-    starting_when_exiting(pcb);
+    goto done;
 
-  bool is_process_exiting = false;
   // 禁用中断主要是为了防止被中断处理程序触发的exit(-1)影响
   DISABLE_INTR({
-    if (pcb->exiting)
-      is_process_exiting = true;
-    else
+    if (!pcb->exiting)
       list_push_front(&pcb->threads, &t->prog_elem);
   });
 
   /* 通过判断现在进程是不是在退出，决定是跳到用户空间还是继续执行
      因为使用了install_page将用户栈注册到进程页目录中，因此无需
      额外释放用户栈，process_exit执行时候会释放此线程用户栈 */
-  if (is_process_exiting)
-    starting_when_exiting(pcb);
-
+  done:
+  running_when_exiting(pcb);
   asm volatile(" movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
 
   NOT_REACHED();
@@ -1063,15 +1081,18 @@ static void start_pthread(void* exec_) {
  * 
  * @param pcb 
  */
-static void starting_when_exiting(struct process* pcb) {
-  lock_acquire(&pcb->pcb_lock);
-  pcb->pending_thread--;
-  if (pcb->pending_thread == 0)
-    free(pcb);
-  else
-    lock_release(&pcb->pcb_lock);
-  thread_exit();
-  NOT_REACHED();
+void running_when_exiting(struct process* pcb) {
+  bool exit_flag = false;
+  DISABLE_INTR({
+    pcb->pending_thread--;
+    thread_current()->in_handler = false;
+    if (pcb->exiting && pcb->pending_thread == 1) {
+      cond_signal(&pcb->pcb_cond, &pcb->pcb_lock);
+      exit_flag = true;
+    }
+  });
+  if (exit_flag)
+    thread_exit();
 }
 
 /* Creates a new stack for the thread and sets up its arguments.
@@ -1093,8 +1114,8 @@ bool setup_thread(void (**eip)(void), void** esp, struct init_tcb* init_tcb) {
   *eip = init_tcb->sf;
 
   *esp -= 0x10;
-  *((uint32_t*)(*esp) + 1) = init_tcb->arg;
-  *(uint32_t*)(*esp) = init_tcb->tf;
+  *((void**)(*esp) + 1) = init_tcb->arg;
+  *(pthread_fun*)(*esp) = init_tcb->tf;
   *esp -= 0x4;
 
   success = true;
@@ -1211,7 +1232,7 @@ static void init_process(struct process* new_pcb, struct init_pcb* init_pcb) {
   lock_init(&(new_pcb->pcb_lock));
   new_pcb->exiting = false;
   new_pcb->thread_exiting = NULL;
-  new_pcb->pending_thread = 0;
+  new_pcb->pending_thread = 1;
 
   // Continue initializing the PCB as normal
   new_pcb->main_thread = thread_current();

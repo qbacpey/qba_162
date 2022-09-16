@@ -115,7 +115,6 @@ struct thread {
   int64_t wake_up; // 需要在什么时候醒来
 
   struct lock tcb_lock;           // TCB中非列表字段的锁
-  struct condition tcb_condition; // 和TCB锁配套使用
 
   /* Strict Priority Scheduler 相关 */
   struct lock* donated_for; // 线程最近一次接收优先级捐献由哪一个锁诱发？
@@ -127,6 +126,7 @@ struct thread {
   struct list* queue;    /* 当前位于什么队列中（如果是timer的话值为NULL） */
   struct list_elem elem; /* List element. */
 
+  bool in_handler;     /* 现在是否位于内核中？ */
 #ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb;        /* Process control block if this thread is a userprog */

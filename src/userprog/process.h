@@ -176,8 +176,9 @@ struct process {
   struct list semas_tab;     /* 进程用户空间信号量列表 */
 
   // 线程系统相关
-  struct lock pcb_lock; /* PCB中非列表字段的锁 */
-  struct list threads;  /* 元素是TCB */
+  struct lock pcb_lock;      /* PCB中非列表字段的锁 */
+  struct condition pcb_cond; /* 条件变量 */
+  struct list threads;       /* 元素是TCB */
   struct bitmap* stacks; /* 进程已经在虚拟内存空间中分配了多少个栈？（Bitmap） */
   bool exiting;          /* 进程是否正在执行exit函数？ */
   struct thread* thread_exiting; /* 当前是否有函数正在执行process_exit */
@@ -202,5 +203,7 @@ tid_t pthread_execute(stub_fun, pthread_fun, void*);
 tid_t pthread_join(tid_t);
 void pthread_exit(void);
 void pthread_exit_main(void);
+
+void running_when_exiting(struct process* pcb);
 
 #endif /* userprog/process.h */
