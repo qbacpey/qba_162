@@ -25,7 +25,7 @@
 
 static void process_exit_tail(struct process*, struct thread*);
 inline static void set_exit_code(struct process*, int32_t);
-inline static void exit_helper(struct thread*, struct list*);
+inline static void exit_helper(struct thread*, struct list*, bool);
 
 /* Free the current thread's resources. Most resources will
    be freed on thread_exit(), so all we have to do is deallocate the
@@ -78,17 +78,16 @@ void pthread_exit_main(void) {
   }
 
   enum intr_level old_level = intr_disable();
-  set_exit_code(pcb, 0);
   if (pcb->pending_thread > 1) {
-    thread_block();
-    ASSERT(pcb->pending_thread == 1);
+    NOT_REACHED();
   }
-
+  ASSERT(pcb->pending_thread == 1);
   list_remove(&tcb->prog_elem);
+  intr_set_level(old_level);
+
   struct thread* pos = NULL;
   list_clean_each(pos, &pcb->threads, prog_elem, { palloc_free_page(pos); });
 
-  intr_set_level(old_level);
   process_exit_tail(pcb, tcb);
 }
 
@@ -106,9 +105,9 @@ void process_exit_exception(int exit_code) {
   set_exit_code(pcb, exit_code);
   list_remove(&tcb->prog_elem);
   if (pcb->exiting == EXITING_MAIN)
-    exit_helper(pcb->main_thread, &pcb->threads);
-  else if (pcb->exiting == EXITING_NORMAL)
-    exit_helper(pcb->thread_exiting, &pcb->threads);
+    exit_helper(pcb->main_thread, &pcb->threads ,false);
+  else if (pcb->exiting == EXITING_NORMAL) 
+    exit_helper(pcb->thread_exiting, &pcb->threads, true);
 
   pcb->exiting = EXITING_EXCEPTION;
   struct thread* pos = NULL;
@@ -147,7 +146,7 @@ void process_exit_normal(int exit_code) {
     pcb->exiting = EXITING_NORMAL;
     pcb->thread_exiting = tcb;
     // 此时主线程已经将自己从线程队列中拿出来了 要把它放回去
-    exit_helper(pcb->main_thread, &pcb->threads);
+    exit_helper(pcb->main_thread, &pcb->threads, false);
   } else {
     exiting = true;
   }
@@ -162,6 +161,7 @@ void process_exit_normal(int exit_code) {
   // 第一次遍历
   enum intr_level old_level = intr_disable();
   list_remove(&tcb->prog_elem);
+  tcb->joined_by = tcb; /* 防止自己在阻塞的时候被Join */
   struct thread* pos = NULL;
   list_for_each_entry(pos, &pcb->threads, prog_elem) {
     if (pos->in_handler == false) {
@@ -174,13 +174,15 @@ void process_exit_normal(int exit_code) {
   pos = NULL;
 
   // 第一次遍历完成，阻塞直到只剩下自己
-  thread_block();
+  if (pcb->pending_thread > 1) {
+    thread_block();
+  }
   ASSERT(pcb->pending_thread == 1);
-
+  list_remove(&tcb->prog_elem);
+  intr_set_level(old_level);
+  
   // 开始第二次遍历
   list_clean_each(pos, &pcb->threads, prog_elem, { palloc_free_page(pos); });
-  intr_set_level(old_level);
-
   process_exit_tail(pcb, tcb);
 }
 
@@ -233,9 +235,11 @@ void exit_if_exiting(struct process* pcb) {
  * 
  * @param t 
  * @param list 
+ * @param flag 要不要将这个线程压入线程队列 
  */
-inline static void exit_helper(struct thread* t, struct list* list) {
-  list_push_front(list, &t->prog_elem);
+inline static void exit_helper(struct thread* t, struct list* list,bool flag) {
+  if(flag)
+    list_push_front(list, &t->prog_elem);
   t->status = THREAD_ZOMBIE;
   list_remove(&t->elem);
   list_remove(&t->allelem);

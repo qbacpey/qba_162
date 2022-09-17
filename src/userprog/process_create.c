@@ -938,8 +938,13 @@ done:
 
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
-tid_t pthread_join(tid_t tid UNUSED) {
+tid_t pthread_join(tid_t tid) {
+  tid_t result = TID_ERROR;
   enum intr_level old_level = intr_disable();
+  
+
+
+
   intr_set_level(old_level);
   return -1;
 }
