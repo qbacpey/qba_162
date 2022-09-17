@@ -700,7 +700,7 @@ struct thread {
   - 进程退出时需检查线程此变量，决定要不要直接将其释放；
 - `pending_thread`用于表示系统中尚有多少个线程位于内核；
   - 进入系统调用的时候将其递增，离开时递减；
-  - `process_exit`执行时，需根据其中的值决定如何等待未执行完毕的线程；
+  - `process_exit`执行时，需根据其中的值决定如何等待未执行完毕的线程，只有最后才递减自己的`pending_thread`；
 - `exiting`进程用来表示现在进程是不是已经退出或正在执行`process_exit`；
   - 第一个进入`process_exit`的线程将其设置为`true`；
   - 系统调用处理程序离开时，需要判断这个值以及`pend_thread`，确定接下来的行动；
@@ -710,15 +710,18 @@ struct thread {
   - 以`in_handler`作为释放TCB的指标；
   - 不清除任何线程的资源，仅仅移出准备队列以及设置线程状态；
   - 为了和Join系统协作，需要上溯线程链并妥善处理Join链顶部线程；
-  - 迭代完之后就`THREAD_BLOCK`，等待`pending_thread==0`之后被唤醒；
+  - 迭代完之后就`THREAD_BLOCK`，等待`pending_thread==1`之后被唤醒；
 - 第二次遍历：目的是确认本进程所有线程已正常退出；
-  - 使用`pending_thread==0`和条件变量协作，不使用`join_by`；
+  - 使用`pending_thread`和`thread_exiting`协作，不使用`join_by`；
   - `pend_thread==1`之后再遍历列表清除剩余线程TCB；
-  - 要求`exit(-1)`能直接跳到这一步，直接清除所有线程的资源；
+  - `exit(-1)`直接跳到这一步清除所有线程的资源；
 
 同时，线程退出的时候也需要处理一些额外的逻辑：
 - 线程退出的时候将自己的状态设置为`THREAD_ZOMBIE`而不是`THREAD_DYING`，同时需要`--pending_thread`；
-- 让自己现在或未来的joiner来清除自己的资源；
+- 让自己现在或未来的joiner来清除自己的资源，要么就是让`process_exit`代自己完成这一过程；
+
+由于主线程不会将自己的TCB加入线程队列，因此线程退出的时候需要执行一些额外的逻辑
+
 ### 线程库函数
 #### 线程创建相关函数
 
@@ -755,8 +758,8 @@ struct thread {
 - 执行`pthread_exit`时发生退出事件：
   - 无需添加额外的处理代码；
 - 执行`pthread_exit_main`时发生退出事件：
-  - 阻塞前发生退出事件：`process_exit`必然在此线程再次被调度之前阻塞，因此只需在阻塞前检查`exiting`就可以将此问题划归为普通的系统调用问题；
-  - 阻塞中发生退出事件：`process_exit`会在第一次迭代时直接将主线程状态标记为`THREAD_ZOMBIE`并将其移出等待队列。第二次迭代的时候如果他还在那么就释放其资源；
+  - 阻塞前发生退出事件：`process_exit`必然在此线程再次被调度之前睡眠，因此只需在阻塞前检查`exiting`就可以将此问题划归为普通的系统调用问题；
+  - 阻塞中发生退出事件：`process_exit`进入函数时会帮主线程递减`pending_thread`并将其设置为`THREAD_ZOMBIE`，第二次迭代时释放其资源；
 
 ##### `pthread_exit`
 
@@ -774,32 +777,16 @@ struct thread {
 
 主线程退出函数，基本可视为`process_exit(0)`的包装，但是允许用户代码继续执行[^主线程最后的Join是否可能引发死锁？]：
 - 唤醒自己的`joined_by`；
-- 禁用中断、递减`pending_thread`、校验`exiting`：
-  - `true`：直接退出；
-  - `false`：`thread_block`直到`pending_thread==0`；
+- 禁用中断并校验`exiting`：
+  - `true`：执行`running_when_exiting`；
+  - `false`：`thread_block`直到`pending_thread==1`被唤醒；
 - 调用`process_exit(0)`；
+
+进入`process_exit`之后需要将自己的TCB归入`thread_exiting`，因此外部中断清理的时候需要额外注意一下`thread_exiting`是不是和`main_thread`相同，防止重复释放
 
 ##### `process_exit`
 
 进程退出函数，详情见后`exit`系统调用部分
-##### 遍历活跃线程
-
-遍历的时候不要修改线程表，让`thread_join`承担TCB清理工作，见到一个状态不是`THREAD_ZOMBIE`的，join它即可：
-
-- `thread_create`创建线程的时候需要在线程表的最后加TCB：
-  - 活跃线程可能在主线程遍历线程表的过程中，创建其他线程；
-  - 确保一但join完到线程列表的最后一个元素，线程列表中的所有线程都运行完毕了；
-  - 同时凭借`thread_join`的清理功能，顺带完成了TCB的清除工作；
-- 主线程join一个具体的活跃线程（非`THREAD_ZOMBIE/THREAD_DYING`）的时候[^活跃线程]，需要检查线程的`joined_by`，直到遇见`NULL`之后（到达join线程链的末尾）再join这个线程：
-  - 如果遇见`joined_by`不是`NULL`的线程，跳过他的TCB即可；
-  - 目的是为了防止出现join死锁，或者说违反项目的不变性（一个线程只能被join一次）；
-  - 获取锁之后务必再次检查TCB的`joined_by`，防止在获锁间歇这个线程被其他线程join了；
-
-- 需要一直不断地遍历线程列表，直到其中TCB数量为$0$或其中线程的状态全部是`THREAD_ZOMBIE`为止：
-  - 可以使用一个flag表示这一点；
-  - 对于那些不是`THREAD_READY`的线程，不能简单删掉TCB！
-- 如果在线程列表中遇见一个状态是`THREAD_ZOMBIE`的线程，跳过即可；
-
 #### `pthread_join`
 
 阻塞直到指定线程执行完毕之后再继续执行（注意，任何线程可以join同进程的任何其他线程）
@@ -880,36 +867,73 @@ Sanity Test：或许可以使用宏实现，`pthread_join`执行之前需要执�
 
 假设一个进入内核的线程永远不会被阻塞。进程中任一线程调用`exit`的时候，其他所有的线程都立即释放所有的资源，随后用户程序直接结束
 
+另外，由于进程退出有三套不同的处理逻辑，因此最好使用不同的函数将不同的逻辑分隔开：
+- `process_exit`改成`process_exit_tail`：
+  - 将原来的遍历线程队列部分拆出来，独立为三个不同的部分；
+  - 仅存放释放进程资源的代码，如释放锁和父子进程共同部分；
+- `pthread_exit_main`：
+  - 遍历线程完毕之后设置`thread_exit`并调用`process_exit_tail`；
+  - 主线程与`thread_exiting`重合的逻辑在这里处理；
+- 新增`process_exit_exception`为异常处理程序调用的进程退出函数:
+  - 直接执行线程队列清空逻辑；
+  - 执行异常处理程序相关逻辑之后调用`process_exit_tail`；
+- 新增`process_exit_normal`为非主线程调用的进程退出函数；
+  - 执行完普通线程的退出逻辑之后调用`process_exit_tail`;
+
 ##### 整体执行流程
 
 `exit`函数的整体执行流程基本如下（不包括原有的执行流程）：
 
-1. 检查自己PCB的`exiting`字段：
+1. 检查`exiting`和`thread_exiting`字段：
 
-   - `true`：比对自己的退出码和PCB中已有的退出码之后，执行`thread_exit`；
-     - 代表已经有线程在执行`exit()`了，因此直接执行`thread_exit`；
+   - `exiting==false`：自己是第一个执行`process_exit`的线程；
+     - 设置`exiting=true`；
+     - 设置`thread_exiting=thread_current()`；
+     - 将`exit_code`同步到PCB中；
+   - `exiting==true, thread_exiting==NULL`：代表主线程正在执行`pthread_exit_main`后陷入睡眠；
+     - 设置`thread_exiting=thread_current()`；
+     - 需要为主线程递减`pending_thread`并将其设置为`THREAD_ZOMBIE`；
+     - 将`exit_code`同步到PCB中；
+   - `exiting==true, thread_exiting!=NULL`：代表已经有其他线程在自己之前一步执行`process_exit`；
+     - 比对并设置`exit_code`；
+     - 执行`running_when_exiting`；
+   - 进入此函数的上下文是中断处理程序：无需做任何设置操作，直接跳过这一步；    
 
-   - `false`：将其设置为`true`并将自己的退出码更行到PCB中，随后继续执行；
+2. 根据退出码和中断性质的不同`exit`的执行情况可以被分为两类：
 
-2. 释放资源，在原基础上，还需要释放这些东西：
+- 内部中断执行`exit`：进程执行系统调用`exit`，正常退出：
+  - 遍历并等待线程列表：
+    - 第一次遍历不清除任何资源，仅将TCB移出准备队列以及设置线程状态，全程禁用中断；
+    - 第二次遍历用于等待内核中线程执行完毕，使用`pending_thread`维护；
+    - 在遍历之前如果检查到`exiting==true`但是`thread_exiting==NULL`的话，就可以断定在主线程执行`main_thread_exit`的时候被当前线程抢先了，因此这时候同时也需要将主线程移出等待队列并将其状态标记为`THREAD_ZOMBIE`；
+  - 第一次遍历:
+    - 禁用中断且提升优先级可确保外部中断不可能干扰这个过程；
+    - 先将自己的TCB从队列中移除（`list_remove`），然后唤醒自己的`join_by`；
+    - 需将所有遇到的`in_handler==false`的线程标记为`THREAD_ZOMBIE`并将其TCB移出准备队列。如果它有`joined_by`，唤醒之（不要漏掉主线程）；
+    - 对于`in_handler==true`的线程来说，设置`exiting`的这个操作就足够令其退出了；
+  - 第二次遍历：
+    - 直接`thread_block`，被唤醒之后确保不变性：`ASSERT(pending_thread==0)`；
+    - 随后释放线程列表中的所有线程资源即可（如果当前线程不是主线程，还需要释放`main_thread`的资源）；
+- 外部中断执行`exit`：跳过第一次遍历，直接释放线程列表中所有线程的资源：
+  - 执行时行为：
+    - 首先将自己的TCB从线程队列中移出；
+    - 释放`thread_exiting`的资源；
+    - 确认自己是不是主线程，如果不是，那么需要释放主线程资源；
+    - 遍历线程列表，清除其中所有线程的资源。但是要注意每清除一个`in_handler`线程的资源都需要递减`pending_thread`；
+  - 两种触发外部中断的可能：
+    - 第一种可能是其他系统调用引发Page Fault之类的异常，触发`exit(-1)`；
+    - 第二种可能是在之前内部中断触发的`exit`第一次遍历线程列表完毕，阻塞之后，类似第一种情况引发的异常触发外部中断：
+  - 其他注意事项：
+    - 考虑到外部中断环境线程必不可能被中断，因此获取锁之类的操作都不需要，直接释放所有线程的资源即可；
+    - 考虑到新创建的线程可能在没有执行`start_process`之前就被外部中断退出事件抢先，因此外部中断在退出的最后，如果在递减自己的`pending_thread`之后发现它仍然不为$0$，那么就不能`free(PCB)`，需要让那些未被调度过的新线程来帮助自己完成这一过程；
+
+3. 释放资源，在原基础上，还需要释放这些东西[^exit()中的线程表]：
 
    - 进程持有的所有的内核资源（锁），其中属于本进程的锁直接FREE内存即可；
      - 采取的策略是让`exit`线程`wait`所有拥有内核资源的线程，这些线程系统调用退出的时候需要检查PCB的`exiting`字段。如果是`true`那么需要执行`thread_exit`，这种情况也算是`thread_yield`，因此不需要设置为`THREAD_DYING`；
 
    - 内核锁引用计数为0的所有线程的TCB，检索进程的线程列表即可；
      - 考虑到`exit()`线程会join所有线程，而`thread_join`会清除僵尸线程的TCB，因此处于`THREAD_ZOMBIE`的线程不需要担心资源释放问题；
-
-3. 将自己从线程列表中拖出来（`list_remove`）之后遍历进程的线程列表，检查它们的`in_handler`：
-
-   - `true`：设置此线程TCB的`process_exited`，跳到下一个TCB中；
-   - `false`：直接将其从Ready Queue/Waiting List中拉出来删掉，跳到下一个TCB以后将这个TCB从线程表中移除（注意使用`list_remove`）同时FREE；
-     - 对于那些`THREAD_BLOCKED/THREAD_READY`线程，由于它们TCB中的`list_elem`是两用的，因此直接使用`list_elem`将线程从Wait list 中移除即可；
-
-4. 检查线程表是否为空[^exit()中的线程表]：
-
-   - `true`：继续执行；
-   - `false`：`wait`条件变量`pending_thread==0`；
-
 ##### 进程退出码
 
 进程退出码：以下是进程可能的退出码，越往后的优先级越高，也就会覆盖前面的退出码：
@@ -1072,41 +1096,24 @@ if(intr_context()){ /* 触发外部中断 */
     /* 第二次遍历 */
     
 }
-
-
 /* 下面的部分就是清除锁列表了，还有更新父子进程共享数据的时候也需要禁用中断 */
 ~~~
-
-根据退出码和中断性质的不同`exit`的执行情况可以被分为三类：
-
-- 内部中断执行`exit(0)`：进程执行系统调用`exit`，正常退出
-  - 需要遍历并等待线程列表：
-    - 第一次遍历用于清除非内核中线程，全程禁用中断；
-    - 第二次遍历用于等待内核中线程执行完毕，使用条件变量（`pending_thread`）进行维护；
-  - 第一次遍历:
-    - 由于中断被禁用，因此外部中断不可能干扰这个过程；
-    - 如果有其他线程执行`exit(-1)`的时候被这个`exit(0)`抢先了，由于禁用中断的缘故，这两个线程也不可能纠缠在一起。由于`exit(-1)`并非由外部中断所引发，因此可以简单设置退出码就离开，无需强制清空线程表，也就可以将这些工作交给`exit(0)`线程来完成；
-  - 第二次遍历：
-    - 外部中断可能在内核线程执行的过程中发生并调用`exit(-1)`，此时`exit(0)`线程处于条件变量的等待队列当中，因此外部中断可以安全地清空线程列表（包括`exit(0)`的TCB）之后接替它的工作；
-    - 如果是其他途径触发的`exit(-1)`，设置一下`exit_code`之后`thread_exit`即可。由于进入和设置`exit_code`的时候中断都是被禁用的，因此无需关心Race Condition的问题；
-    - 另外，为了防止意外苏醒，需要在`wait`的外部加上`while`；
-
 #### `pending_thread`
 
 ~~~c
 uint32_t pending_thread; /* 当前有多少个内核线程还在执行 */
 ~~~
 
-1. 考虑到系统在同一时间仅可能处理一个硬件中断，因此硬件中断无需维护`pending_thread`以及`in_handler`;
+1. 任何对`pending_thread`以及`in_handler`的操作都必须禁用中断;
 2. 系统在进入系统调用处理程序的时候需要`++pending_thread`、`in_handler=true`，离开时需要`--pending_thread`、`in_handler=false`;
 3. 下面是一些特殊情况：
-   - `thread_create`: 进入之前需要再次`++pending_thread`，应对此函数执行过程中发生进程退出的情形。初始化新线程的时候需要`in_handler=true`；
-   - `start_thread`: 将自己添加到PCB线程队列之后再`--pending_thread`;
+   - `thread_create`: 进入之前需要再次`++pending_thread`，应对此函数执行过程中发生进程退出的情形。初始化新线程的时候需要将新线程的`in_handler=true`；
+   - `start_thread`: 将自己添加到PCB线程队列之后再`--pending_thread, in_handler=false`;
    - `thread_exit`: 由于执行此系统调用不会返回，因此也需要`--`;
-   - `process_exit`: 如果到最后`pending_thread`依然不是0（可能在`thread_execute`和`start_thread`将TCB入列的间歇执行了`process_exit`），那么自己需要先`--pending_thread`再睡眠；
+   - `process_exit`: 如果到最后`pending_thread`依然不是$1$（可能在`thread_execute`和`start_thread`将TCB入列的间歇执行了`process_exit`），那么`--pending_thread`但是不释放PCB；
 4. 上述所有操作`pending_thread`的线程都需要实现这一个逻辑：
-   - 如果本线程递减`pending_thread`发现其值为1且`exiting==true`，那么需要`signal`一下进而通知正在执行`process_exit`的线程；
-   - 执行`process_exit`的线程如果在遍历队列之后发现`pending_thread!=1`那么就需要释放锁，一直等到被`signal`起来为止 
+   - 如果本线程递减`pending_thread`发现其值为1且`exiting==true`，那么需要通知`thread_exiting`或`main_thread`；
+   - 由内部中断引发的`process_exit`的线程如果在第一次遍历队列之后发现`pending_thread!=1`那么就`thread_block`，直到被叫起来为止； 
 ##### 访问方式
 
 写入访问：
