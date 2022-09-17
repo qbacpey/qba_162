@@ -761,7 +761,7 @@ static bool setup_stack(void** esp, void* top) {
 
   enum intr_level old_level = intr_disable();
 #ifdef USERPROG
-  if (thread_current()->pcb->exiting) {
+  if (!NONE_OR_MAIN(thread_current()->pcb->exiting)) {
     goto done;
   }
 #endif
@@ -889,7 +889,7 @@ static void start_pthread(void* exec_) {
 
   // 禁用中断主要是为了防止被中断处理程序触发的exit(-1)影响
   DISABLE_INTR({
-    if (!pcb->exiting)
+    if (NONE_OR_MAIN(pcb->exiting))
       list_push_front(&pcb->threads, &t->prog_elem);
   });
 
@@ -897,7 +897,7 @@ static void start_pthread(void* exec_) {
      因为使用了install_page将用户栈注册到进程页目录中，因此无需
      额外释放用户栈，process_exit执行时候会释放此线程用户栈 */
 done:
-  running_when_exiting(pcb);
+  exit_if_exiting(pcb);
   asm volatile(" movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
 
   NOT_REACHED();
@@ -939,6 +939,16 @@ done:
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
 tid_t pthread_join(tid_t tid UNUSED) { return -1; }
+
+/**
+ * @brief 如果此线程有Joiner的话，将他叫醒
+ * 
+ * @param t 
+ */
+inline void wake_up_joiner(struct thread* t) {
+  if (t->joined_by != NULL)
+    thread_unblock(thread_current()->joined_by);
+}
 
 /* Reads a byte at user virtual address UADDR. UADDR must be below PHYS_BASE.
 Returns the byte value if successful, -1 if a segfault occurred. */
@@ -1017,9 +1027,10 @@ static void init_process(struct process* new_pcb, struct init_pcb* init_pcb) {
   // 初始化线程系统相关字段
   list_init(&(new_pcb->threads));
   lock_init(&(new_pcb->pcb_lock));
-  new_pcb->exiting = false;
+  new_pcb->exiting = EXITING_NONE;
   new_pcb->thread_exiting = NULL;
   new_pcb->pending_thread = 1;
+  new_pcb->exit_code = 0;
 
   // Continue initializing the PCB as normal
   new_pcb->main_thread = thread_current();

@@ -260,7 +260,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     process_exit_normal(f->eax);
   }
   // 系统调用过后直接执行process_exit不需要执行此函数
-  running_when_exiting(pcb);
+  exit_if_exiting(pcb);
 }
 
 static int handler_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }

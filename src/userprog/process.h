@@ -19,6 +19,13 @@ typedef tid_t pid_t;
 typedef void (*pthread_fun)(void*);
 typedef void (*stub_fun)(pthread_fun, void*);
 
+/* 进程退出事件级别 */
+enum exiting_status {
+  EXITING_NONE,     /* 未发生任何退出事件 */
+  EXITING_MAIN,     /* 主线程正在执行pthread_exit_main */
+  EXITING_NORMAL,   /* 执行系统调用exit触发的退出事件 可能位于退出进程的后半段 */
+  EXITING_EXCEPTION /* 进程已因异常退出 */
+};
 struct registered_lock {
   lock_t* lid;           /* 锁的标识符 */
   struct lock lock;      /* 锁本身 */
@@ -180,7 +187,8 @@ struct process {
   struct condition pcb_cond; /* 条件变量 */
   struct list threads;       /* 元素是TCB */
   struct bitmap* stacks; /* 进程已经在虚拟内存空间中分配了多少个栈？（Bitmap） */
-  bool exiting;          /* 进程是否正在执行exit函数？ */
+  enum exiting_status exiting;   /* 退出事件等级 */
+  int32_t exit_code;             /* 临时进程退出码 */
   struct thread* thread_exiting; /* 当前是否有函数正在执行process_exit */
   uint32_t pending_thread;       /* 当前有多少个内核线程还在执行 */
 
@@ -204,9 +212,10 @@ pid_t get_pid(struct process*);
 
 tid_t pthread_execute(stub_fun, pthread_fun, void*);
 tid_t pthread_join(tid_t);
+inline void wake_up_joiner(struct thread*);
 void pthread_exit(void);
 void pthread_exit_main(void);
 
-void running_when_exiting(struct process* pcb);
+void exit_if_exiting(struct process* pcb);
 
 #endif /* userprog/process.h */

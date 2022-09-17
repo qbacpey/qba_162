@@ -23,6 +23,8 @@ enum thread_status {
   THREAD_ZOMBIE   /* 线程已结束，但尚未被join，需要回收TCB */
 };
 
+#define NONE_OR_MAIN(exiting) (exiting == EXITING_NONE || exiting == EXITING_MAIN)
+
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
 typedef int tid_t;
