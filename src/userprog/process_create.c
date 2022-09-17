@@ -938,7 +938,11 @@ done:
 
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
-tid_t pthread_join(tid_t tid UNUSED) { return -1; }
+tid_t pthread_join(tid_t tid UNUSED) {
+  enum intr_level old_level = intr_disable();
+  intr_set_level(old_level);
+  return -1;
+}
 
 /**
  * @brief 如果此线程有Joiner的话，将他叫醒
@@ -1031,6 +1035,7 @@ static void init_process(struct process* new_pcb, struct init_pcb* init_pcb) {
   new_pcb->thread_exiting = NULL;
   new_pcb->pending_thread = 1;
   new_pcb->exit_code = 0;
+  list_push_front(&new_pcb->threads, &thread_current()->prog_elem);
 
   // Continue initializing the PCB as normal
   new_pcb->main_thread = thread_current();

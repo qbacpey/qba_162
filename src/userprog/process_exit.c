@@ -23,9 +23,9 @@
 #include "userprog/filesys_lock.h"
 #include "bitmap.h"
 
-
 static void process_exit_tail(struct process*, struct thread*);
 inline static void set_exit_code(struct process*, int32_t);
+inline static void exit_helper(struct thread*, struct list*);
 
 /* Free the current thread's resources. Most resources will
    be freed on thread_exit(), so all we have to do is deallocate the
@@ -57,6 +57,7 @@ void pthread_exit(void) {
 void pthread_exit_main(void) {
   struct thread* tcb = thread_current();
   struct process* pcb = tcb->pcb;
+  ASSERT(is_main_thread(tcb, pcb));
   bool exiting = false;
   wake_up_joiner(tcb);
 
@@ -71,14 +72,53 @@ void pthread_exit_main(void) {
   intr_set_level(old_level);
 
   // 如果现时退出态比现在的更高，直接退出
-  if(exiting){
+  if (exiting) {
     exit_if_exiting(pcb);
     NOT_REACHED();
   }
+
+  enum intr_level old_level = intr_disable();
+  set_exit_code(pcb, 0);
+  if (pcb->pending_thread > 1) {
+    thread_block();
+    ASSERT(pcb->pending_thread == 1);
+  }
+
+  list_remove(&tcb->prog_elem);
+  struct thread* pos = NULL;
+  list_clean_each(pos, &pcb->threads, prog_elem, { palloc_free_page(pos); });
+
+  intr_set_level(old_level);
+  process_exit_tail(pcb, tcb);
 }
 
-void process_exit_exception(int exit_code){
-    PANIC("process_exit_exception 尚未实现");
+/**
+ * @brief 系统调用处理程序执行时触发错误
+ * 
+ * @param exit_code 
+ */
+void process_exit_exception(int exit_code) {
+  ASSERT(intr_context());
+
+  struct thread* tcb = thread_current();
+  struct process* pcb = tcb->pcb;
+  pcb->exiting = EXITING_EXCEPTION;
+  set_exit_code(pcb, exit_code);
+  list_remove(&tcb->prog_elem);
+  if (pcb->exiting == EXITING_MAIN)
+    exit_helper(pcb->main_thread, &pcb->threads);
+  else if (pcb->exiting == EXITING_NORMAL)
+    exit_helper(pcb->thread_exiting, &pcb->threads);
+
+  pcb->exiting = EXITING_EXCEPTION;
+  struct thread* pos = NULL;
+  list_clean_each(pos, &pcb->threads, prog_elem, {
+    if (pos->in_handler == true)
+      pcb->pending_thread--;
+    palloc_free_page(pos);
+  });
+
+  process_exit_tail(pcb, tcb);
 }
 
 /**
@@ -89,12 +129,15 @@ void process_exit_exception(int exit_code){
  */
 void process_exit_normal(int exit_code) {
   /* If this thread does not have a PCB, don't worry */
+  thread_set_priority(PRI_MAX);
   struct thread* tcb = thread_current();
   if (tcb->pcb == NULL) {
     thread_exit();
     NOT_REACHED();
   }
   struct process* pcb = tcb->pcb;
+  ASSERT(!is_main_thread(tcb, pcb));
+
   bool exiting = false;
   wake_up_joiner(tcb);
 
@@ -103,18 +146,20 @@ void process_exit_normal(int exit_code) {
   if (NONE_OR_MAIN(pcb->exiting)) {
     pcb->exiting = EXITING_NORMAL;
     pcb->thread_exiting = tcb;
+    // 此时主线程已经将自己从线程队列中拿出来了 要把它放回去
+    exit_helper(pcb->main_thread, &pcb->threads);
   } else {
     exiting = true;
   }
   intr_set_level(old_level);
 
   // 如果现时退出态比现在的更高，直接退出
-  if(exiting){
+  if (exiting) {
     exit_if_exiting(pcb);
     NOT_REACHED();
   }
 
-  // 第一次遍历 
+  // 第一次遍历
   enum intr_level old_level = intr_disable();
   list_remove(&tcb->prog_elem);
   struct thread* pos = NULL;
@@ -126,30 +171,14 @@ void process_exit_normal(int exit_code) {
       wake_up_joiner(pos);
     }
   }
-
-  pos = pcb->main_thread;
-  if (pos->in_handler == false) {
-    pos->status = THREAD_ZOMBIE;
-    list_remove(&pos->elem);
-    list_remove(&pos->allelem);
-    wake_up_joiner(pos);
-  }
+  pos = NULL;
 
   // 第一次遍历完成，阻塞直到只剩下自己
   thread_block();
   ASSERT(pcb->pending_thread == 1);
 
   // 开始第二次遍历
-  list_clean_each(pos, &pcb->threads, prog_elem, {
-    list_remove(&pos->elem);
-    list_remove(&pos->allelem);
-    palloc_free_page(pos);
-  });
-
-  pos = pcb->main_thread;
-  list_remove(&pos->elem);
-  list_remove(&pos->allelem);
-  palloc_free_page(pos);
+  list_clean_each(pos, &pcb->threads, prog_elem, { palloc_free_page(pos); });
   intr_set_level(old_level);
 
   process_exit_tail(pcb, tcb);
@@ -175,9 +204,10 @@ void exit_if_exiting(struct process* pcb) {
   if (pcb->exiting == EXITING_EXCEPTION) { /* 外部中断已经将进程所有资源释放 */
     thread_exit_flag = true;
     /* 可能外部中断有多个遗留线程，令`pending_thread==0`清除 */
-    if (pcb->pending_thread == 0) 
-        free_pcb = true;
-  } else if (pcb->exiting == EXITING_NORMAL || pcb->exiting == EXITING_MAIN) { /* `process_exit`阻塞 */
+    if (pcb->pending_thread == 0)
+      free_pcb = true;
+  } else if (pcb->exiting == EXITING_NORMAL ||
+             pcb->exiting == EXITING_MAIN) { /* `process_exit`阻塞 */
     pthread_exit_flag = true;
     if (pcb->pending_thread == 1) {
       if (pcb->thread_exiting != NULL) /* 优先唤醒thread_exiting */
@@ -195,6 +225,20 @@ void exit_if_exiting(struct process* pcb) {
   } else if (pthread_exit_flag) {
     pthread_exit();
   }
+}
+
+/**
+ * @brief 将t压入线程队列
+ * 令其成为THREAD_ZOMBIE
+ * 
+ * @param t 
+ * @param list 
+ */
+inline static void exit_helper(struct thread* t, struct list* list) {
+  list_push_front(list, &t->prog_elem);
+  t->status = THREAD_ZOMBIE;
+  list_remove(&t->elem);
+  list_remove(&t->allelem);
 }
 
 /* Free the current process's resources. 
@@ -235,12 +279,12 @@ void exit_if_exiting(struct process* pcb) {
  */
 static void process_exit_tail(struct process* pcb, struct thread* tcb) {
   // 将自己的优先级设置为系统最大值
-  thread_set_priority(PRI_MAX);
+  if (!intr_context())
+    ASSERT(pcb->pending_thread == 1);
 
   struct thread* cur = tcb;
   struct process* pcb_to_free = pcb;
   uint32_t* pd;
-
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -313,8 +357,11 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
 
   /* 资源全部释放 */
   cur->pcb = NULL;
-  free(pcb_to_free);
-
+  if (pcb_to_free->pending_thread > 1) {
+    free(pcb_to_free);
+  } else {
+    pcb_to_free->pending_thread--;
+  }
   // sema_up(&temporary);
   thread_exit();
 }
