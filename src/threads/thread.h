@@ -169,6 +169,7 @@ tid_t thread_create(const char* name, int priority, thread_func*, void*);
 
 /* 同步原语将线程归入等待队列时调用，当前线程sleep，调用schedule() */
 void thread_block(void);
+void thread_zombie(void);
 /* 同步原语将线程移出等待队列时调用，当前线程不会sleep */
 void thread_unblock(struct thread*);
 

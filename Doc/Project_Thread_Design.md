@@ -761,6 +761,12 @@ struct thread {
   - 阻塞前发生退出事件：`process_exit`必然在此线程再次被调度之前睡眠，因此只需在阻塞前检查`exiting`就可以将此问题划归为普通的系统调用问题；
   - 阻塞中发生退出事件：`process_exit`进入函数时会帮主线程递减`pending_thread`并将其设置为`THREAD_ZOMBIE`，第二次迭代时释放其资源；
 
+##### `running_when_exiting`
+
+执行`pending_thread`有关处理逻辑，仅可以被用户线程对应的内核线程调用：
+- 任何线程退出内核时都需要执行此函数；
+- 系统执行外部中断时退出时，可能存在多个第一次未被调度的线程，因此外部中断退出时需要将`thread_main`设置为`NULL`；
+- 只有确认外部中断已经释放进程资源时才执行`thread_exit`直接退出，否则执行`pthread_exit`（可能唤醒`joined_by`）；
 ##### `pthread_exit`
 
 普通线程的退出函数，不可调用`process_exit`退出进程：
@@ -769,7 +775,6 @@ struct thread {
 - 退出状态为`THREAD_ZOMBIE`；
 - 无需将自己移出PCB线程队列；
 - 唤醒`joined_by`：用户栈、虚拟内存空间、TCB都由它释放[^退出状态][^死锁1]；
-- 执行`running_when_exiting`；
 
 ##### `pthread_exit_main`
 

@@ -81,7 +81,7 @@ static void kill(struct intr_frame* f) {
              intr_name(f->vec_no));
       intr_dump_frame(f);
       printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
-      process_exit(-1);
+      process_exit_exception(-1);
       NOT_REACHED();
 
     case SEL_KCSEG:
@@ -95,7 +95,7 @@ static void kill(struct intr_frame* f) {
       if(f->vec_no == 14){
          // kernel page fault
          printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
-         process_exit(-1);
+         process_exit_exception(-1);
       } 
       intr_dump_frame(f);
       PANIC("Kernel bug - unexpected interrupt in kernel");

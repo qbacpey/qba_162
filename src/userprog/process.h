@@ -191,7 +191,10 @@ void userprog_init(void);
 
 pid_t process_execute(const char* file_name);
 int process_wait(pid_t);
-void process_exit(int);
+
+void process_exit_exception(int);
+void process_exit_normal(int);
+
 void process_activate(void);
 void free_parent_self(struct child_process*, int);
 void free_child_self(struct child_process*);

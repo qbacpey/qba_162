@@ -278,6 +278,18 @@ void thread_block(void) {
   thread_current()->status = THREAD_BLOCKED;
   schedule();
 }
+/**
+ * @brief 将自己的状态设置为`THREAD_ZOMBIE`
+ * 直到被`thread_join`或`process_tail`清除
+ * 
+ */
+void thread_zombie(void) {
+  ASSERT(!intr_context());
+  ASSERT(intr_get_level() == INTR_OFF);
+
+  thread_current()->status = THREAD_ZOMBIE;
+  schedule();
+}
 
 /* Places a thread on the ready structure appropriate for the
    current active scheduling policy.

@@ -91,7 +91,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       if (beneath) {
         f->eax = args[1];
         printf("%s: exit(%d)\n", pcb->process_name, args[1]);
-        process_exit(f->eax);
+        process_exit_normal(f->eax);
       }
       break;
 
@@ -251,13 +251,13 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
     default:
       printf("Unknown system call number: %d\n", args[0]);
-      process_exit(-1);
+      process_exit_normal(-1);
       break;
   }
 
   if (!beneath) {
     printf("%s: exit(%d)\n", pcb->process_name, f->eax);
-    process_exit(f->eax);
+    process_exit_normal(f->eax);
   }
   // 系统调用过后直接执行process_exit不需要执行此函数
   running_when_exiting(pcb);
