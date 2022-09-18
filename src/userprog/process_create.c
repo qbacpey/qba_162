@@ -38,6 +38,7 @@ struct init_tcb {
   pthread_fun tf;
   void* arg;
   struct process* pcb;
+  struct semaphore* finished; /* 线程创建完成时UP这个信号量 */
   size_t stack_no; /* 由pthread_execute分配的栈编号 */
 };
 
@@ -846,11 +847,15 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
   init_tcb->pcb = pcb;
   init_tcb->stack_no = stack_no;
 
+  struct semaphore finished;
+  sema_init(&finished, 0);
+  init_tcb->finished = &finished;
   tid_t tid = thread_create("sub thread", PRI_DEFAULT, &start_pthread, init_tcb);
   if (tid == TID_ERROR){
     free(init_tcb);
     bitmap_scan_and_flip(pcb->stacks, stack_no, 1, false);
   }
+  sema_down(&finished);
   return tid;
 }
 
@@ -882,23 +887,25 @@ static void start_pthread(void* exec_) {
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = setup_thread(&if_.eip, &if_.esp, init_tcb);
-  free(init_tcb);
+  
   if (!success)
     goto done;
 
   // 禁用中断主要是为了防止被中断处理程序触发的exit(-1)影响
-  DISABLE_INTR({
-    if (NONE_OR_MAIN(pcb->exiting))
-      list_push_front(&pcb->threads, &t->prog_elem);
-  });
+  rw_lock_acquire(&pcb->threads_lock, RW_WRITER);
+  if (NONE_OR_MAIN(pcb->exiting))
+    list_push_front(&pcb->threads, &t->prog_elem);
+  rw_lock_release(&pcb->threads_lock, RW_WRITER);
 
 /* 通过判断现在进程是不是在退出，决定是跳到用户空间还是继续执行
      因为使用了install_page将用户栈注册到进程页目录中，因此无需
      额外释放用户栈，process_exit执行时候会释放此线程用户栈 */
 done:
+// 通知pthread_execute进程创建函数执行完毕
+  sema_up(init_tcb->finished);
+  free(init_tcb);
   exit_if_exiting(pcb);
-  asm volatile(" movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
-
+  asm volatile("movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
 }
 
@@ -919,10 +926,10 @@ bool setup_thread(void (**eip)(void), void** esp, struct init_tcb* init_tcb) {
   if (!setup_stack(esp, PHYS_BASE - init_tcb->stack_no * STACK_SIZE))
     goto done;
   *eip = init_tcb->sf;
-
+   pagedir_activate(thread_current()->pcb->pagedir);
   *esp -= 0x10;
-  *((void**)(*esp) + 1) = init_tcb->arg;
-  *(pthread_fun*)(*esp) = init_tcb->tf;
+  *((uint32_t *)(*esp) + 1) = init_tcb->arg;
+  *(pthread_fun *)(*esp) = init_tcb->tf;
   *esp -= 0x4;
 
   success = true;
@@ -1021,20 +1028,21 @@ tid_t pthread_join(tid_t tid) {
 
   rw_lock_acquire(&pcb->threads_lock, RW_WRITER);
   lock_acquire(&pos->join_lock);
+
   result = pos->tid;
   // 获取线程锁之后该线程必然退出
   ASSERT(pos->status == THREAD_ZOMBIE);
   // 移出线程队列
   list_remove(&pos->prog_elem);
-  // 释放pos的用户栈
-  pagedir_clear_page(
-      pcb->pagedir,
-      pagedir_get_page(pcb->pagedir, ((uint8_t*)PHYS_BASE - pos->stack_no * STACK_SIZE) - PGSIZE));
-  // 释放pos的内核栈
-  DISABLE_INTR({palloc_free_page(pos);});
   // lock_release(&pos->join_lock);
   rw_lock_release(&pcb->threads_lock, RW_WRITER);
 
+  // 释放pos的用户栈
+  void* stack = ((void*)PHYS_BASE - pos->stack_no * STACK_SIZE) - PGSIZE;
+  palloc_free_page(pagedir_get_page(pcb->pagedir, stack));
+  pagedir_clear_page(pcb->pagedir, stack);
+  // 释放pos的内核栈
+  DISABLE_INTR({ palloc_free_page(pos); });
   return result;
 }
 
@@ -1118,7 +1126,8 @@ static void init_process(struct process* new_pcb, struct init_pcb* init_pcb) {
   lock_init(&(new_pcb->pcb_lock));
   new_pcb->exiting = EXITING_NONE;
   new_pcb->thread_exiting = NULL;
-  new_pcb->pending_thread = 1;
+  // TODO 未执行完毕的主线程不算
+  new_pcb->pending_thread = 0;
   new_pcb->exit_code = 0;
   list_push_front(&new_pcb->threads, &thread_current()->prog_elem);
 

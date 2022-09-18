@@ -115,7 +115,7 @@ void pthread_exit_main(void) {
  * @param exit_code 
  */
 void process_exit_exception(int exit_code) {
-  ASSERT(intr_context());
+  ASSERT(exit_code == -1);
 
   struct thread* tcb = thread_current();
   struct process* pcb = tcb->pcb;
@@ -308,9 +308,9 @@ inline static void exit_helper(struct thread* t, struct list* list,bool flag) {
  */
 static void process_exit_tail(struct process* pcb, struct thread* tcb) {
   // 将自己的优先级设置为系统最大值
-  if (!intr_context()) {
-    ASSERT(pcb->pending_thread == 1);
-  }
+  // if (!intr_context()) {
+  //   ASSERT(pcb->pending_thread == 1);
+  // }
 
   struct thread* cur = tcb;
   struct process* pcb_to_free = pcb;
