@@ -530,6 +530,8 @@ static void handler_pthread_exit(struct process* pcb) {
   if(is_main_thread(thread_current(), pcb)){
     pthread_exit_main();
   } else {
+    // 有可能通过exit_if_exiting退出
+    // 也有可能直接退出
     pthread_exit();
   }
 }

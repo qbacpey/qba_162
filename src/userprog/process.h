@@ -21,9 +21,9 @@ typedef void (*stub_fun)(pthread_fun, void*);
 
 /* 进程退出事件级别 */
 enum exiting_status {
-  EXITING_NONE,     /* 未发生任何退出事件 */
-  EXITING_MAIN,     /* 主线程正在执行pthread_exit_main */
-  EXITING_NORMAL,   /* 执行系统调用exit触发的退出事件 可能位于退出进程的后半段 */
+  EXITING_NONE, /* 未发生任何退出事件 */
+  EXITING_MAIN, /* 主线程正在执行pthread_exit_main */
+  EXITING_NORMAL, /* 执行系统调用exit触发的退出事件 可能位于退出进程的后半段 */
   EXITING_EXCEPTION /* 进程已因异常退出 */
 };
 struct registered_lock {
@@ -166,7 +166,7 @@ struct process {
   struct file* exec;
   struct process* parent; /* 指向父进程 */
   char process_name[16];  /* Name of the main thread */
-  struct lock pcb_lock;      /* PCB中非列表字段的锁 */
+  struct lock pcb_lock;   /* PCB中非列表字段的锁 */
 
   struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
   struct list children;       /* 元素是子进程表元素，也就是struct child_process */
@@ -185,7 +185,7 @@ struct process {
 
   // 线程系统相关
   struct rw_lock threads_lock; /* 线程队列读写锁 */
-  struct list threads;       /* 元素是TCB */
+  struct list threads;         /* 元素是TCB */
   struct bitmap* stacks; /* 进程已经在虚拟内存空间中分配了多少个栈？（Bitmap） */
   enum exiting_status exiting;   /* 退出事件等级 */
   int32_t exit_code;             /* 临时进程退出码 */
@@ -198,6 +198,7 @@ struct process {
 void userprog_init(void);
 
 pid_t process_execute(const char* file_name);
+bool setup_stack(void**, void*);
 int process_wait(pid_t);
 
 void process_exit_exception(int);

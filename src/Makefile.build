@@ -56,8 +56,10 @@ lib/kernel_SRC += lib/kernel/console.c	# printf(), putchar().
 lib/kernel_SRC += lib/kernel/test-lib.c # Testing functions
 
 # User process code.
-userprog_SRC  = userprog/process_create.c	# Process loading.
+userprog_SRC  = userprog/process_create.c	 # Process loading.
 userprog_SRC += userprog/process_exit.c	# Process exiting.
+userprog_SRC += userprog/userthread_create.c	# User thread create.
+userprog_SRC += userprog/userthread_join.c	# User thread join.
 userprog_SRC += userprog/pagedir.c	# Page directories.
 userprog_SRC += userprog/exception.c	# User exception handler.
 userprog_SRC += userprog/syscall.c	# System call handler.

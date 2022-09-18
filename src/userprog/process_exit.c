@@ -38,7 +38,10 @@ inline static void exit_helper(struct thread*, struct list*, bool);
    now, it does nothing. */
 void pthread_exit(void) {
   ASSERT(!intr_context());
+  // 也有可能正常的推出流程
   lock_acquire(&thread_current()->join_lock);
+  thread_current()->pcb->pending_thread--;
+  thread_current()->in_handler = false;
   wake_up_joiner(thread_current());
   thread_zombie();
   NOT_REACHED();
