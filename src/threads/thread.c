@@ -279,14 +279,17 @@ void thread_block(void) {
   schedule();
 }
 /**
- * @brief 将自己的状态设置为`THREAD_ZOMBIE`
- * 直到被`thread_join`或`process_tail`清除
+ * @brief 将自己的状态设置为`THREAD_ZOMBIE`直到被`thread_join`或`process_tail`清除。
+ * 此函数会释放join_lock，因此调用此函数前需要获取tcb->join_lock
  * 
  */
 void thread_zombie(void) {
   ASSERT(!intr_context());
-  ASSERT(intr_get_level() == INTR_OFF);
+  ASSERT(intr_get_level() != INTR_OFF);
 
+  intr_disable();
+  lock_release(&thread_current()->join_lock);
+  list_remove(&thread_current()->allelem);
   thread_current()->status = THREAD_ZOMBIE;
   schedule();
 }
@@ -554,7 +557,7 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   memset(t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
-  lock_init(&t->tcb_lock);
+  lock_init(&t->join_lock);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
 #ifdef USERPROG
   t->pcb = NULL;

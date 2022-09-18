@@ -166,6 +166,7 @@ struct process {
   struct file* exec;
   struct process* parent; /* 指向父进程 */
   char process_name[16];  /* Name of the main thread */
+  struct lock pcb_lock;      /* PCB中非列表字段的锁 */
 
   struct child_process* self; /* 指向父进程中自身对应的子进程表元素 */
   struct list children;       /* 元素是子进程表元素，也就是struct child_process */
@@ -183,8 +184,7 @@ struct process {
   struct list semas_tab;     /* 进程用户空间信号量列表 */
 
   // 线程系统相关
-  struct lock pcb_lock;      /* PCB中非列表字段的锁 */
-  struct condition pcb_cond; /* 条件变量 */
+  struct rw_lock threads_lock; /* 线程队列读写锁 */
   struct list threads;       /* 元素是TCB */
   struct bitmap* stacks; /* 进程已经在虚拟内存空间中分配了多少个栈？（Bitmap） */
   enum exiting_status exiting;   /* 退出事件等级 */
@@ -212,7 +212,7 @@ pid_t get_pid(struct process*);
 
 tid_t pthread_execute(stub_fun, pthread_fun, void*);
 tid_t pthread_join(tid_t);
-inline void wake_up_joiner(struct thread*);
+void wake_up_joiner(struct thread*);
 void pthread_exit(void);
 void pthread_exit_main(void);
 

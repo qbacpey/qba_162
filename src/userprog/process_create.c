@@ -45,7 +45,6 @@ struct semaphore* filesys_sema = NULL; /* 定义全局临时文件系统锁 */
 // static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static void process_exit_tail(int exit_code);
 static bool load(const char* file_name, void (**eip)(void), void** esp);
 static void init_process(struct process* new_pcb, struct init_pcb* init_pcb);
 inline static size_t stack_no(uint8_t* stack);
@@ -867,12 +866,12 @@ static void start_pthread(void* exec_) {
   struct process* pcb = NULL;
   struct intr_frame if_;
 
-  lock_acquire(&t->tcb_lock);
+  lock_acquire(&t->join_lock);
   t->pcb = init_tcb->pcb;
   t->stack_no = init_tcb->stack_no;
   t->joined_by = NULL;
   t->joining = NULL;
-  lock_release(&t->tcb_lock);
+  lock_release(&t->join_lock);
 
   ASSERT(t->pcb != NULL);
   pcb = t->pcb;
@@ -940,23 +939,103 @@ done:
    now, it does nothing. */
 tid_t pthread_join(tid_t tid) {
   tid_t result = TID_ERROR;
-  enum intr_level old_level = intr_disable();
-  
+  struct thread* tcb = thread_current();
+  struct process* pcb = tcb->pcb;
+  bool found = false;
+  rw_lock_acquire(&pcb->threads_lock, RW_READER);
+  struct thread* pos = NULL;
+  list_for_each_entry(pos, &pcb->threads, prog_elem) {
+    if (pos->tid == tid) {
+      lock_acquire(&pos->join_lock);
+      if (pos->joined_by == NULL) 
+        found = true;
+      lock_release(&pos->join_lock);
+      break;
+    }
+  }
+  rw_lock_release(&pcb->threads_lock, RW_READER);
 
+  if (!found)
+    return result;
 
+  enum intr_level old_level;
+  bool joinable = false;
+  // 为防止死锁，不可获取自己的锁
+  // lock_acquire(&tcb->join_lock);
 
-  intr_set_level(old_level);
-  return -1;
-}
+  // 上溯join链
+  struct thread* chain = pos;
+  /* 离开循环时chain只有两种可能
+   * 
+   * 1.没有被join过的pos：THREAD_ZOMBIE/chain->joined_by == NULL
+   * 2.现在没有在join任何线程的活跃线程
+   * 
+   */
+  for (;; chain = chain->joining) {
+    lock_acquire(&chain->join_lock);
+    old_level = intr_disable();
+    // 只有chain往前再无joining的时候才能断定chain是可以Join的对象
+    if (chain->joining == NULL) {
+      // 正在运行中的线程，也有可能已退出
+      if (chain->status != THREAD_ZOMBIE) {
+        if (chain == tcb)
+          joinable = false;
+        else
+          joinable = true;
+        break;
+      } else {
+        // 可能没有人Join过它，也可能ZOMBIE的Joiner已被唤醒，需回滚
+        if (chain->joined_by == NULL) {
+          joinable = true;
+          break;
+        } else {
+          // 避免不必要的死锁，先释放
+          intr_set_level(old_level);
+          lock_release(&chain->join_lock);
+          // pthread_exit执行序列确保ZOMBIE必然在唤醒joiner之后再变ZOMBIE
+          // 同时其joining必然为NULL
+          ASSERT(chain->joined_by->joining != chain);
+          chain = chain->joined_by;
+          continue;
+        }
+      }
+    }
+    intr_set_level(old_level);
+    lock_release(&chain->join_lock);
+  }
+  /* 禁用中断且持有链顶线程锁，可确保链顶线程没有join任何东西 */
 
-/**
- * @brief 如果此线程有Joiner的话，将他叫醒
- * 
- * @param t 
- */
-inline void wake_up_joiner(struct thread* t) {
-  if (t->joined_by != NULL)
-    thread_unblock(thread_current()->joined_by);
+  // 但是pos可能在遍历时被捷足先登了
+  // 自身如果被join倒是没有关系，毕竟自己的链顶线程是安全的
+  if (!joinable || pos->joined_by != NULL) {
+    // 在if语句中跳出循环，需要手动启用中断和释放锁
+    intr_set_level(old_level);
+    lock_release(&chain->join_lock);
+    return result;
+  }
+
+  pos->joined_by = tcb;
+  tcb->joining = pos;
+  lock_release(&chain->join_lock);
+  thread_block();
+
+  rw_lock_acquire(&pcb->threads_lock, RW_WRITER);
+  lock_acquire(&pos->join_lock);
+  result = pos->tid;
+  // 获取线程锁之后该线程必然退出
+  ASSERT(pos->status == THREAD_ZOMBIE);
+  // 移出线程队列
+  list_remove(&pos->prog_elem);
+  // 释放pos的用户栈
+  pagedir_clear_page(
+      pcb->pagedir,
+      pagedir_get_page(pcb->pagedir, ((uint8_t*)PHYS_BASE - pos->stack_no * STACK_SIZE) - PGSIZE));
+  // 释放pos的内核栈
+  DISABLE_INTR({palloc_free_page(pos);});
+  // lock_release(&pos->join_lock);
+  rw_lock_release(&pcb->threads_lock, RW_WRITER);
+
+  return result;
 }
 
 /* Reads a byte at user virtual address UADDR. UADDR must be below PHYS_BASE.
@@ -1035,6 +1114,7 @@ static void init_process(struct process* new_pcb, struct init_pcb* init_pcb) {
 
   // 初始化线程系统相关字段
   list_init(&(new_pcb->threads));
+  rw_lock_init(&new_pcb->threads_lock);
   lock_init(&(new_pcb->pcb_lock));
   new_pcb->exiting = EXITING_NONE;
   new_pcb->thread_exiting = NULL;

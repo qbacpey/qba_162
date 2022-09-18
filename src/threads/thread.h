@@ -116,8 +116,6 @@ struct thread {
 
   int64_t wake_up; // 需要在什么时候醒来
 
-  struct lock tcb_lock;           // TCB中非列表字段的锁
-
   /* Strict Priority Scheduler 相关 */
   struct lock* donated_for; // 线程最近一次接收优先级捐献由哪一个锁诱发？
   struct list lock_queue;   // 线程当前持有的锁的队列，按锁的优先级进行排列
@@ -131,12 +129,13 @@ struct thread {
   bool in_handler;     /* 现在是否位于内核中？ */
 #ifdef USERPROG
   /* Owned by process.c. */
+#endif
   struct process* pcb;        /* Process control block if this thread is a userprog */
   size_t stack_no;            /* 线程的虚拟内存栈编号 */
   struct list_elem prog_elem; /* 进程线程列表元素 */
+  struct lock join_lock;      /* 访问与Join相关字段之前需要获取此锁 */
   struct thread* joined_by;   /* 指向join当前线程的TCB */
   struct thread* joining;     /* 指向当前线程正在join的线程的TCB */
-#endif
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
