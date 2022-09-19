@@ -53,6 +53,7 @@ tid_t pthread_join(tid_t tid) {
 
   enum intr_level old_level;
   bool block_join = false;
+  bool unjoinable = false;
   bool immediate_join = false;
   // 为防止死锁，不可获取自己的锁
   // lock_acquire(&tcb->join_lock);
@@ -73,7 +74,7 @@ tid_t pthread_join(tid_t tid) {
       // 正在运行中的线程，也有可能已退出
       if (chain->status != THREAD_ZOMBIE) {
         if (chain == tcb)
-          block_join = false;
+          unjoinable = true;
         else
           block_join = true;
         break;
@@ -101,7 +102,8 @@ tid_t pthread_join(tid_t tid) {
 
   // 但是pos可能在遍历时被捷足先登了
   // 自身如果被join倒是没有关系，毕竟自己的链顶线程是安全的
-  if (!block_join || pos->joined_by != NULL) {
+  ASSERT(pos->joined_by == NULL);
+  if (unjoinable) {
     // 在if语句中跳出循环，需要手动启用中断和释放锁
     intr_set_level(old_level);
     lock_release(&chain->join_lock);
@@ -112,12 +114,10 @@ tid_t pthread_join(tid_t tid) {
       tcb->joining = pos;
       lock_release(&chain->join_lock);
       thread_block();
-    } else if (immediate_join) {
+    } else if (immediate_join)
       lock_release(&chain->join_lock);
-      result = pos->tid;
-    } else {
+    else
       PANIC("既不是block_join, 也不是immediate_join, 那是什么?");
-    }
   }
 
   intr_set_level(old_level);
