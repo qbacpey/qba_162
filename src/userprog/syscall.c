@@ -534,6 +534,7 @@ static void handler_pthread_exit(struct process* pcb) {
     // 也有可能直接退出
     pthread_exit();
   }
+  NOT_REACHED();
 }
 static tid_t handler_pthread_join(tid_t tid, struct process* pcb) {
   return pthread_join(tid);

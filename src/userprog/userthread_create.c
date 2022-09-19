@@ -100,18 +100,18 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
 static void start_pthread(void* exec_) {
   struct init_tcb* init_tcb = (struct init_tcb*)exec_;
   struct thread* t = thread_current();
-  struct process* pcb = NULL;
+  struct process* pcb = init_tcb->pcb;
   struct intr_frame if_;
 
   lock_acquire(&t->join_lock);
-  t->pcb = init_tcb->pcb;
+  t->pcb = pcb;
   t->stack_no = init_tcb->stack_no;
-  t->joined_by = NULL;
-  t->joining = NULL;
+  // 因为start_pthread有可能在被Join之后才被运行，因此不能在此赋值
+  // t->joined_by = NULL;
+  // t->joining = NULL;
   lock_release(&t->join_lock);
 
   ASSERT(t->pcb != NULL);
-  pcb = t->pcb;
 
   bool success = false;
   memset(&if_, 0, sizeof if_);

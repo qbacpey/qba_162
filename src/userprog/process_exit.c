@@ -40,8 +40,10 @@ void pthread_exit(void) {
   ASSERT(!intr_context());
   // 也有可能正常的推出流程
   lock_acquire(&thread_current()->join_lock);
+  // todo
   thread_current()->pcb->pending_thread--;
   thread_current()->in_handler = false;
+
   wake_up_joiner(thread_current());
   thread_zombie();
   NOT_REACHED();
@@ -388,9 +390,9 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
   // TODO 线程资源释放
   bitmap_destroy(pcb_to_free->stacks);
 
-  /* 资源全部释放 */
   cur->pcb = NULL;
-  if (pcb_to_free->pending_thread > 1) {
+  /* 就剩下自己了 */
+  if (pcb_to_free->pending_thread == 1) {
     free(pcb_to_free);
   } else {
     pcb_to_free->pending_thread--;

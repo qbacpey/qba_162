@@ -560,10 +560,12 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   lock_init(&t->join_lock);
   t->stack = (uint8_t*)t + PGSIZE; /* 将栈指针移动到页的顶部（Top of Pages） */
 #ifdef USERPROG
+#endif
   t->pcb = NULL;
   t->in_handler = false;
+  t->joined_by = NULL;
+  t->joining = NULL;
   t->stack_no = -1;
-#endif
   t->magic = THREAD_MAGIC;
 
   t->donated_for = NULL;

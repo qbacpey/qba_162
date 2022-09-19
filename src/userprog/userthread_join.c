@@ -52,7 +52,8 @@ tid_t pthread_join(tid_t tid) {
     return result;
 
   enum intr_level old_level;
-  bool joinable = false;
+  bool block_join = false;
+  bool immediate_join = false;
   // 为防止死锁，不可获取自己的锁
   // lock_acquire(&tcb->join_lock);
 
@@ -72,14 +73,14 @@ tid_t pthread_join(tid_t tid) {
       // 正在运行中的线程，也有可能已退出
       if (chain->status != THREAD_ZOMBIE) {
         if (chain == tcb)
-          joinable = false;
+          block_join = false;
         else
-          joinable = true;
+          block_join = true;
         break;
       } else {
         // 可能没有人Join过它，也可能ZOMBIE的Joiner已被唤醒，需回滚
         if (chain->joined_by == NULL) {
-          joinable = true;
+          immediate_join = true;
           break;
         } else {
           // 避免不必要的死锁，先释放
@@ -100,18 +101,26 @@ tid_t pthread_join(tid_t tid) {
 
   // 但是pos可能在遍历时被捷足先登了
   // 自身如果被join倒是没有关系，毕竟自己的链顶线程是安全的
-  if (!joinable || pos->joined_by != NULL) {
+  if (!block_join || pos->joined_by != NULL) {
     // 在if语句中跳出循环，需要手动启用中断和释放锁
     intr_set_level(old_level);
     lock_release(&chain->join_lock);
     return result;
+  } else {
+    pos->joined_by = tcb;
+    if (block_join) {
+      tcb->joining = pos;
+      lock_release(&chain->join_lock);
+      thread_block();
+    } else if (immediate_join) {
+      lock_release(&chain->join_lock);
+      result = pos->tid;
+    } else {
+      PANIC("既不是block_join, 也不是immediate_join, 那是什么?");
+    }
   }
 
-  pos->joined_by = tcb;
-  tcb->joining = pos;
-  lock_release(&chain->join_lock);
-  thread_block();
-
+  intr_set_level(old_level);
   rw_lock_acquire(&pcb->threads_lock, RW_WRITER);
   lock_acquire(&pos->join_lock);
 
@@ -120,7 +129,9 @@ tid_t pthread_join(tid_t tid) {
   ASSERT(pos->status == THREAD_ZOMBIE);
   // 移出线程队列
   list_remove(&pos->prog_elem);
-  // lock_release(&pos->join_lock);
+
+  // 必须将此锁移除自己的锁队列，否则会导致Page Fault
+  lock_release(&pos->join_lock);
   rw_lock_release(&pcb->threads_lock, RW_WRITER);
 
   // 释放pos的用户栈

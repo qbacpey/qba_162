@@ -240,6 +240,7 @@ static void start_process(void* init_pcb_) {
   new_pcb->stacks = bitmap_create(MAX_THREADS);
   ASSERT(new_pcb->stacks != NULL);
   bitmap_set(new_pcb->stacks, 0, true);
+  t->stack_no = 0;
 
   /* 需要确保if_中的状态是FPU的初始状态 */
   asm("fninit; fsave (%0)" : : "g"(&if_.fpu_state));
