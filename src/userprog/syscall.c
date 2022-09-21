@@ -260,7 +260,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     process_exit_normal(f->eax);
   }
   // 系统调用过后直接执行process_exit不需要执行此函数
-  exit_if_exiting(pcb);
+  exit_if_exiting(pcb, false);
 }
 
 static int handler_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
@@ -527,18 +527,14 @@ static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, void* arg,
 }
 
 static void handler_pthread_exit(struct process* pcb) {
-  if(is_main_thread(thread_current(), pcb)){
+  if (is_main_thread(thread_current(), pcb))
     pthread_exit_main();
-  } else {
-    // 有可能通过exit_if_exiting退出
-    // 也有可能直接退出
-    pthread_exit();
-  }
+  else
+    exit_if_exiting(pcb, true); // 通过exit_if_exiting退出
+
   NOT_REACHED();
 }
-static tid_t handler_pthread_join(tid_t tid, struct process* pcb) {
-  return pthread_join(tid);
-}
+static tid_t handler_pthread_join(tid_t tid, struct process* pcb) { return pthread_join(tid); }
 
 /**
  * @brief 将锁注册到内核空间

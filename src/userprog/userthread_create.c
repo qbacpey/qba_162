@@ -136,7 +136,7 @@ done:
   // 通知pthread_execute进程创建函数执行完毕
   sema_up(init_tcb->finished);
   free(init_tcb);
-  exit_if_exiting(pcb);
+  exit_if_exiting(pcb, false);
   asm volatile("movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
 }

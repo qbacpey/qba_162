@@ -134,12 +134,8 @@ tid_t pthread_join(tid_t tid) {
   lock_release(&pos->join_lock);
   rw_lock_release(&pcb->threads_lock, RW_WRITER);
 
-  // 释放pos的用户栈
-  void* stack = ((void*)PHYS_BASE - pos->stack_no * STACK_SIZE) - PGSIZE;
-  palloc_free_page(pagedir_get_page(pcb->pagedir, stack));
-  pagedir_clear_page(pcb->pagedir, stack);
-  pagedir_activate(pcb->pagedir);
   // 释放pos的内核栈
   DISABLE_INTR({ palloc_free_page(pos); });
+  pagedir_activate(pcb->pagedir);
   return result;
 }

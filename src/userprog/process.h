@@ -214,9 +214,8 @@ pid_t get_pid(struct process*);
 tid_t pthread_execute(stub_fun, pthread_fun, void*);
 tid_t pthread_join(tid_t);
 void wake_up_joiner(struct thread*);
-void pthread_exit(void);
+void exit_if_exiting(struct process*, bool);
 void pthread_exit_main(void);
 
-void exit_if_exiting(struct process* pcb);
 
 #endif /* userprog/process.h */

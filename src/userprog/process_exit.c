@@ -26,6 +26,8 @@
 static void process_exit_tail(struct process*, struct thread*);
 inline static void set_exit_code(struct process*, int32_t);
 inline static void exit_helper(struct thread*, struct list*, bool);
+inline static void exit_helper_remove_from_list(struct thread*);
+static void pthread_exit(void);
 
 /* Free the current thread's resources. Most resources will
    be freed on thread_exit(), so all we have to do is deallocate the
@@ -36,16 +38,23 @@ inline static void exit_helper(struct thread*, struct list*, bool);
 
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. */
-void pthread_exit(void) {
+static void pthread_exit(void) {
   ASSERT(!intr_context());
-  // 也有可能正常的推出流程
-  lock_acquire(&thread_current()->join_lock);
-  // todo
-  thread_current()->pcb->pending_thread--;
-  thread_current()->in_handler = false;
+  struct thread* t = thread_current();
 
-  wake_up_joiner(thread_current());
-  thread_zombie();
+  lock_acquire(&t->join_lock);
+  wake_up_joiner(t);
+  lock_release(&t->join_lock);
+
+  intr_disable();
+  // 释放pos的用户栈
+  void* stack = ((void*)PHYS_BASE - t->stack_no * STACK_SIZE) - PGSIZE;
+  palloc_free_page(pagedir_get_page(t->pcb->pagedir, stack));
+  pagedir_clear_page(t->pcb->pagedir, stack);
+
+  exit_helper_remove_from_list(t);
+  t->queue = NULL;
+  thread_zombie(t);
   NOT_REACHED();
 }
 
@@ -55,8 +64,8 @@ void pthread_exit(void) {
  * @param t 
  */
 void wake_up_joiner(struct thread* t) {
-  struct thread *joiner = t->joined_by;
-  if (joiner != NULL){
+  struct thread* joiner = t->joined_by;
+  if (joiner != NULL) {
     lock_acquire(&joiner->join_lock);
     joiner->joining = NULL;
     thread_unblock(joiner);
@@ -94,7 +103,7 @@ void pthread_exit_main(void) {
 
   // 如果现时退出态比现在的更高，直接退出
   if (exiting) {
-    exit_if_exiting(pcb);
+    exit_if_exiting(pcb, false);
     NOT_REACHED();
   }
 
@@ -128,8 +137,8 @@ void process_exit_exception(int exit_code) {
   set_exit_code(pcb, exit_code);
   list_remove(&tcb->prog_elem);
   if (pcb->exiting == EXITING_MAIN)
-    exit_helper(pcb->main_thread, &pcb->threads ,false);
-  else if (pcb->exiting == EXITING_NORMAL) 
+    exit_helper(pcb->main_thread, &pcb->threads, false);
+  else if (pcb->exiting == EXITING_NORMAL)
     exit_helper(pcb->thread_exiting, &pcb->threads, true);
 
   pcb->exiting = EXITING_EXCEPTION;
@@ -137,6 +146,7 @@ void process_exit_exception(int exit_code) {
   list_clean_each(pos, &pcb->threads, prog_elem, {
     if (pos->in_handler == true)
       pcb->pending_thread--;
+    exit_helper_remove_from_list(pos);
     palloc_free_page(pos);
   });
 
@@ -181,7 +191,7 @@ void process_exit_normal(int exit_code) {
 
   // 如果现时退出态比现在的更高，直接退出
   if (exiting) {
-    exit_if_exiting(pcb);
+    exit_if_exiting(pcb, true);
     NOT_REACHED();
   }
 
@@ -196,7 +206,7 @@ void process_exit_normal(int exit_code) {
     old_level = intr_disable();
     if (pos->in_handler == false) {
       pos->status = THREAD_ZOMBIE;
-      list_remove(&pos->elem);
+      exit_helper_remove_from_list(pos);
       list_remove(&pos->allelem);
       wake_up_joiner(pos);
     }
@@ -213,22 +223,25 @@ void process_exit_normal(int exit_code) {
   intr_set_level(old_level);
 
   // 开始第二次遍历
-  ASSERT(pcb->pending_thread == 1);  
+  ASSERT(pcb->pending_thread == 1);
   list_clean_each(pos, &pcb->threads, prog_elem, { palloc_free_page(pos); });
   process_exit_tail(pcb, tcb);
 }
 
 /**
- * @brief 任何线程退出内核时都需要执行此函数
+ * @brief 执行退出检查或直接退出
+ * 
+ * @details 任何线程退出内核时都需要执行此函数
  * 如果进程正在退出，那么需要执行退出逻辑
  * 可能调用thread_exit以DYING退出
  * 也可能调用pthread_exit以ZOMBIE退出
  * 
  * @param pcb 
+ * @param is_pthread_exit 用于表示线程是否想要退出
  */
-void exit_if_exiting(struct process* pcb) {
+void exit_if_exiting(struct process* pcb, bool is_pthread_exit) {
   bool thread_exit_flag = false;
-  bool pthread_exit_flag = false;
+  bool pthread_exit_flag = is_pthread_exit;
   bool free_pcb = false;
 
   enum intr_level old_level = intr_disable();
@@ -268,11 +281,16 @@ void exit_if_exiting(struct process* pcb) {
  * @param list 
  * @param flag 要不要将这个线程压入线程队列 
  */
-inline static void exit_helper(struct thread* t, struct list* list,bool flag) {
-  if(flag)
+inline static void exit_helper(struct thread* t, struct list* list, bool flag) {
+  if (flag)
     list_push_front(list, &t->prog_elem);
   t->status = THREAD_ZOMBIE;
   list_remove(&t->allelem);
+}
+
+inline static void exit_helper_remove_from_list(struct thread* pos) {
+  if (pos->queue != NULL && (pos->status == THREAD_BLOCKED || pos->status == THREAD_READY))
+    list_remove(&pos->elem);
 }
 
 /* Free the current process's resources. 
@@ -387,7 +405,7 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
     }
   });
 
-  // TODO 线程资源释放
+  // TODO 线程相关资源释放
   bitmap_destroy(pcb_to_free->stacks);
 
   cur->pcb = NULL;

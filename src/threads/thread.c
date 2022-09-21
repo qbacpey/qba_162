@@ -275,6 +275,7 @@ void thread_block(void) {
   ASSERT(!intr_context());
   ASSERT(intr_get_level() == INTR_OFF);
 
+  thread_current()->queue = NULL;
   thread_current()->status = THREAD_BLOCKED;
   schedule();
 }
@@ -283,14 +284,12 @@ void thread_block(void) {
  * 此函数会释放join_lock，因此调用此函数前需要获取tcb->join_lock
  * 
  */
-void thread_zombie(void) {
+void thread_zombie(struct thread* t) {
   ASSERT(!intr_context());
-  ASSERT(intr_get_level() != INTR_OFF);
+  ASSERT(intr_get_level() == INTR_OFF);
 
-  intr_disable();
-  lock_release(&thread_current()->join_lock);
-  list_remove(&thread_current()->allelem);
-  thread_current()->status = THREAD_ZOMBIE;
+  list_remove(&t->allelem);
+  t->status = THREAD_ZOMBIE;
   schedule();
 }
 
