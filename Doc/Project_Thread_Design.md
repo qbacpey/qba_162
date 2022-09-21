@@ -9,6 +9,45 @@ Group X (replace X with your group number)
 |      |                  |       |
 |      |                  |       |
 
+## Test
+
+下面是本项目需要通过的测试（划去表示已通过）：
+- multithreading
+  - lock
+    - **tests/userprog/multithreading/lock-init-fail**
+  - pcb
+    - **tests/userprog/multithreading/pcb-syn**
+  - sema
+    - **tests/userprog/multithreading/sema-init-fail**
+  - join
+    - **tests/userprog/multithreading/join-exit-1**
+    - **tests/userprog/multithreading/join-exit-2**
+  - file
+    - **tests/userprog/multithreading/file-join**
+  - arr
+    - **tests/userprog/multithreading/arr-search**
+  - exit
+    - **tests/userprog/multithreading/exit-clean-1**
+    - **tests/userprog/multithreading/exit-clean-2**
+  - exec
+    - **tests/userprog/multithreading/exec-thread-1**
+  - multi-oom-mt
+    - **tests/userprog/multithreading/multi-oom-mt**
+- filesys
+  - syn
+    - **tests/filesys/base/syn-read**
+    - **tests/filesys/base/syn-write**
+- threads
+  - priority
+    - **tests/threads/priority-donate-sema**
+  - smfs
+- userprog
+  - **tests/userprog/write-bad-ptr**
+
+
+
+
+
 # Efficient Alarm Clock
 
 TODO:
