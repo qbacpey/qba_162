@@ -244,10 +244,11 @@ void exit_if_exiting(struct process* pcb, bool is_pthread_exit) {
   bool thread_exit_flag = false;
   bool pthread_exit_flag = is_pthread_exit;
   bool free_pcb = false;
+  struct thread* t = thread_current();
 
   enum intr_level old_level = intr_disable();
   pcb->pending_thread--;
-  thread_current()->in_handler = false;
+  t->in_handler = false;
 
   if (pcb->exiting == EXITING_EXCEPTION) { /* 外部中断已经将进程所有资源释放 */
     thread_exit_flag = true;
@@ -266,8 +267,13 @@ void exit_if_exiting(struct process* pcb, bool is_pthread_exit) {
   intr_set_level(old_level);
 
   if (thread_exit_flag) {
-    if (free_pcb)
+    t->pcb = NULL;
+
+    if (free_pcb) {
+      while (!list_empty(&t->lock_queue))
+        list_pop_front(&t->lock_queue);
       free(pcb);
+    }
     thread_exit();
   } else if (pthread_exit_flag) {
     pthread_exit();
@@ -415,6 +421,8 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
   cur->pcb = NULL;
   /* 就剩下自己了 */
   if (pcb_to_free->pending_thread == 1) {
+    while(!list_empty(&cur->lock_queue))
+      list_pop_front(&cur->lock_queue);
     free(pcb_to_free);
   } else {
     pcb_to_free->pending_thread--;

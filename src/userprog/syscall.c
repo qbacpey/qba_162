@@ -37,7 +37,7 @@ static tid_t handler_pthread_join(tid_t tid, struct process* pcb);
 static bool handler_lock_init(lock_t* lock, struct process* pcb);
 static bool handler_lock_acquire(lock_t* lock, struct process* pcb);
 static bool handler_lock_release(lock_t* lock, struct process* pcb);
-static bool handler_sema_init(sema_t* sema, unsigned int val, struct process* pcb);
+static bool handler_sema_init(sema_t* sema, int val, struct process* pcb);
 static bool handler_sema_down(sema_t* sema, struct process* pcb);
 static bool handler_sema_up(sema_t* sema, struct process* pcb);
 static tid_t handler_get_tid(void);
@@ -46,6 +46,7 @@ static inline bool check_fd(uint32_t,
                             struct process*); /* fd系统调用检查，仅检查是否大于下一个文件标识符 */
 static inline bool check_buffer(void*, uint32_t); /* 三参数系统调用检查 */
 static inline bool check_boundary(void*);         /* 单参数系统调用检查 */
+static inline bool check_not_null(uint32_t*);
 
 /* 
  * userprog/syscall.c（也就是本文件）的作用实际上就一个：分发系统调用
@@ -212,40 +213,47 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     case SYS_LOCK_INIT:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_lock_init((lock_t*)args[1], pcb);
+        f->eax = check_not_null(args[1]) ? handler_lock_init((lock_t*)args[1], pcb) : false;
       }
       break;
 
     case SYS_LOCK_ACQUIRE:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_lock_acquire((lock_t*)args[1], pcb);
+        f->eax = check_not_null(args[1]) ? handler_lock_acquire((lock_t*)args[1], pcb) : false;
+        ;
       }
       break;
 
     case SYS_LOCK_RELEASE:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_lock_release((lock_t*)args[1], pcb);
+        f->eax = check_not_null(args[1]) ? handler_lock_release((lock_t*)args[1], pcb) : false;
+        ;
       }
       break;
 
     case SYS_SEMA_INIT:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_sema_init((sema_t*)args[1], (unsigned int)args[2], pcb);
+        f->eax = check_not_null(args[1])
+                     ? handler_sema_init((sema_t*)args[1], args[2], pcb)
+                     : false;
+        ;
       }
       break;
     case SYS_SEMA_DOWN:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_sema_down((sema_t*)args[1], pcb);
+        f->eax = check_not_null(args[1]) ? handler_sema_down((sema_t*)args[1], pcb) : false;
+        ;
       }
       break;
     case SYS_SEMA_UP:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = handler_sema_up((sema_t*)args[1], pcb);
+        f->eax = check_not_null(args[1]) ? handler_sema_up((sema_t*)args[1], pcb) : false;
+        ;
       }
       break;
 
@@ -635,7 +643,9 @@ static bool handler_lock_release(lock_t* lock, struct process* pcb) {
   return true;
 }
 
-static bool handler_sema_init(sema_t* sema, unsigned int val, struct process* pcb) {
+static bool handler_sema_init(sema_t* sema, int val, struct process* pcb) {
+  if(val < 0)
+    return false;
   struct rw_lock* semas_lock = &(pcb->semas_lock);
   struct list* semas_tab = &(pcb->semas_tab);
   rw_lock_acquire(semas_lock, RW_WRITER);
@@ -716,3 +726,4 @@ static inline bool check_buffer(void* buffer, uint32_t size) {
 }
 
 static inline bool check_boundary(void* buffer) { return (void*)(buffer) < (void*)0xbffffffe; }
+static inline bool check_not_null(uint32_t* pointer) { return pointer != NULL; }

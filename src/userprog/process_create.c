@@ -344,7 +344,6 @@ done:
     // sema_up(&temporary);
     /* 如果是exited==false 但是exited_code=-1就说明PCB初始化错误 */
     self->exited = false;
-    bitmap_destroy(new_pcb->stacks);
     sema_up(editing);
     thread_exit();
     NOT_REACHED();

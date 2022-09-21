@@ -225,7 +225,6 @@ bool lock_try_acquire(struct lock* lock) {
     lock->pri = t->e_pri;
     lock->holder = t;
     list_insert_ordered(&t->lock_queue, &lock->elem, &lock_before, NULL);
-    lock->holder = thread_current();
   }
   intr_set_level(old_level);
   return success;
