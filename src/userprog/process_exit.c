@@ -49,6 +49,7 @@ static void pthread_exit(void) {
   intr_disable();
   // 释放pos的用户栈
   void* stack = ((void*)PHYS_BASE - t->stack_no * STACK_SIZE) - PGSIZE;
+  bitmap_scan_and_flip(t->pcb->stacks, 1, 1, true);
   palloc_free_page(pagedir_get_page(t->pcb->pagedir, stack));
   pagedir_clear_page(t->pcb->pagedir, stack);
 
@@ -381,12 +382,15 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
   });
 
   // 释放进程锁列表
-  struct registered_lock* lock_pos = NULL;
-  list_clean_each(lock_pos, &(pcb_to_free->locks_tab), elem, { free(lock_pos); });
-
+  if (list_empty(&pcb_to_free->locks_tab)) {
+    struct registered_lock* lock_pos = NULL;
+    list_clean_each(lock_pos, &(pcb_to_free->locks_tab), elem, { free(lock_pos); });
+  }
   // 释放进程信号量列表
-  struct registered_lock* sema_pos = NULL;
-  list_clean_each(sema_pos, &(pcb_to_free->semas_tab), elem, { free(sema_pos); });
+  if (list_empty(&pcb_to_free->semas_tab)) {
+    struct registered_lock* sema_pos = NULL;
+    list_clean_each(sema_pos, &(pcb_to_free->semas_tab), elem, { free(sema_pos); });
+  }
 
   /* 释放子进程表 */
   struct child_process* child = NULL;
