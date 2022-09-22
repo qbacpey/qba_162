@@ -271,11 +271,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 static int handler_practice(uint32_t* args, struct process* pcb) { return (int)args[1] + 1; }
 
 static double handler_compute_e(uint32_t* args, struct process* pcb) {
-
   if (args[1] < 0) {
     return -1.0;
   }
-
   return sys_sum_to_e(args[1]);
 }
 
@@ -328,6 +326,7 @@ static bool handler_create(uint32_t* args, struct process* pcb) {
 
 static bool handler_remove(uint32_t* args, struct process* pcb) {
   bool result = false;
+
   sema_down(filesys_sema);
   pcb->filesys_sema = filesys_sema;
   result = filesys_remove((char*)args[1]);
@@ -342,8 +341,7 @@ static int handler_open(uint32_t* args, struct process* pcb) {
   struct lock* files_tab_lock = &(pcb->files_lock);
   struct file* new_file = NULL;
 
-  // printf("%s: open file%s\n", pcb->process_name, (char*)args[1]);
-
+  sema_down(filesys_sema);
   pcb->filesys_sema = filesys_sema;
   new_file = filesys_open((char*)args[1]);
   sema_up(filesys_sema);

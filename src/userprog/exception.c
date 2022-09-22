@@ -80,7 +80,6 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
-      printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
       process_exit_exception(-1);
       NOT_REACHED();
 
@@ -94,7 +93,6 @@ static void kill(struct intr_frame* f) {
          */
       if(f->vec_no == 14){
          // kernel page fault
-         printf("%s: exit(%d)\n", thread_current()->pcb->process_name, -1);
          process_exit_exception(-1);
       } 
       intr_dump_frame(f);
