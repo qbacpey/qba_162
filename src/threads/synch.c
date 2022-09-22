@@ -182,18 +182,20 @@ void lock_acquire(struct lock* lock) {
   ASSERT(!lock_held_by_current_thread(lock));
 
   struct thread* t = thread_current();
-  ASSERT(t!=NULL);
 
   enum intr_level old_level = intr_disable();
-  if (--lock->state < 0) {
+  --lock->state;
+  if (lock->state < 0 && lock->holder != NULL) {
     if (t->e_pri > lock->pri){
       // 无论自身优先级如何，必须先设置自己的捐献对象
       t->donated_for = lock;
       donate_pri_acquire(t, lock);
     }
     sema_down(&lock->semaphore);
-  } else
+    // 此时lock->state必然为1
+  } else {
     lock->semaphore.value = 0;
+  }
 
   // 不可在禁用中断的时候申请内存
   // malloc_type(record);
@@ -251,10 +253,11 @@ void lock_release(struct lock* lock) {
     else
       t->e_pri = list_entry(list_begin(&t->lock_queue), struct lock, elem)->pri;
 
-    if (++lock->state < 1)
+    if (lock->state < 0)
       sema_up(&lock->semaphore);
     else
       lock->semaphore.value = 1;
+    lock->state++;
   });
 }
 
