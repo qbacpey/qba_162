@@ -40,13 +40,12 @@ static bool handler_lock_release(lock_t* lock, struct process* pcb);
 static bool handler_sema_init(sema_t* sema, int val, struct process* pcb);
 static bool handler_sema_down(sema_t* sema, struct process* pcb);
 static bool handler_sema_up(sema_t* sema, struct process* pcb);
-static tid_t handler_get_tid(void);
 
 static inline bool check_fd(uint32_t,
                             struct process*); /* fd系统调用检查，仅检查是否大于下一个文件标识符 */
 static inline bool check_buffer(void*, uint32_t); /* 三参数系统调用检查 */
 static inline bool check_boundary(void*);         /* 单参数系统调用检查 */
-static inline bool check_not_null(uint32_t*);
+static inline bool check_not_null(uint32_t);
 
 /* 
  * userprog/syscall.c（也就是本文件）的作用实际上就一个：分发系统调用
@@ -77,7 +76,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   f->eax = -1;
   // 就算exit(-1)在此间插入也没有关系，系统调用最后的逻辑可以处理
   DISABLE_INTR({
-    pcb->pending_thread++;
+    pcb->in_kernel_threads++;
     thread_current()->in_handler = true;
   });
 
@@ -91,7 +90,6 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       beneath = check_boundary(args + 1);
       if (beneath) {
         f->eax = args[1];
-        printf("%s: exit(%d)\n", pcb->process_name, args[1]);
         process_exit_normal(f->eax);
       }
       break;
@@ -203,6 +201,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       break;
 
     case SYS_PT_EXIT:
+      f->eax = 0;
       handler_pthread_exit(pcb);
       break;
 
@@ -221,7 +220,6 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       beneath = check_boundary(args + 1);
       if (beneath) {
         f->eax = check_not_null(args[1]) ? handler_lock_acquire((lock_t*)args[1], pcb) : false;
-        ;
       }
       break;
 
@@ -229,32 +227,31 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       beneath = check_boundary(args + 1);
       if (beneath) {
         f->eax = check_not_null(args[1]) ? handler_lock_release((lock_t*)args[1], pcb) : false;
-        ;
       }
       break;
 
     case SYS_SEMA_INIT:
       beneath = check_boundary(args + 1);
       if (beneath) {
-        f->eax = check_not_null(args[1])
-                     ? handler_sema_init((sema_t*)args[1], args[2], pcb)
-                     : false;
-        ;
+        f->eax =
+            check_not_null(args[1]) ? handler_sema_init((sema_t*)args[1], args[2], pcb) : false;
       }
       break;
     case SYS_SEMA_DOWN:
       beneath = check_boundary(args + 1);
       if (beneath) {
         f->eax = check_not_null(args[1]) ? handler_sema_down((sema_t*)args[1], pcb) : false;
-        ;
       }
       break;
     case SYS_SEMA_UP:
       beneath = check_boundary(args + 1);
       if (beneath) {
         f->eax = check_not_null(args[1]) ? handler_sema_up((sema_t*)args[1], pcb) : false;
-        ;
       }
+      break;
+
+    case SYS_GET_TID:
+      f->eax = thread_current()->tid;
       break;
 
     default:
@@ -525,11 +522,17 @@ static int handler_write(uint32_t* args, struct process* pcb) {
 
 static tid_t handler_pthread_create(stub_fun sfun, pthread_fun tfun, void* arg,
                                     struct process* pcb) {
-  DISABLE_INTR({ pcb->pending_thread++; });
+  DISABLE_INTR({
+    pcb->in_kernel_threads++;
+    pcb->active_threads++;
+  });
 
   tid_t tid = pthread_execute(sfun, tfun, arg);
   if (tid == TID_ERROR)
-    DISABLE_INTR({ pcb->pending_thread--; });
+    DISABLE_INTR({
+      pcb->in_kernel_threads--;
+      pcb->active_threads--;
+    });
 
   return tid;
 }
@@ -644,7 +647,7 @@ static bool handler_lock_release(lock_t* lock, struct process* pcb) {
 }
 
 static bool handler_sema_init(sema_t* sema, int val, struct process* pcb) {
-  if(val < 0)
+  if (val < 0)
     return false;
   struct rw_lock* semas_lock = &(pcb->semas_lock);
   struct list* semas_tab = &(pcb->semas_tab);
@@ -726,4 +729,4 @@ static inline bool check_buffer(void* buffer, uint32_t size) {
 }
 
 static inline bool check_boundary(void* buffer) { return (void*)(buffer) < (void*)0xbffffffe; }
-static inline bool check_not_null(uint32_t* pointer) { return pointer != NULL; }
+static inline bool check_not_null(uint32_t pointer) { return (uint32_t*)pointer != NULL; }

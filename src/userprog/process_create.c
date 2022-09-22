@@ -871,8 +871,8 @@ static void init_process(struct process* new_pcb, struct init_pcb* init_pcb) {
   lock_init(&(new_pcb->pcb_lock));
   new_pcb->exiting = EXITING_NONE;
   new_pcb->thread_exiting = NULL;
-  // TODO 未执行完毕的主线程不算
-  new_pcb->pending_thread = 0;
+  new_pcb->in_kernel_threads = 0;
+  new_pcb->active_threads = 1; /* 初始时只有主线程 */
   new_pcb->exit_code = 0;
   list_push_front(&new_pcb->threads, &thread_current()->prog_elem);
 

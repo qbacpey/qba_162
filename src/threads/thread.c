@@ -184,11 +184,11 @@ void thread_print_stats(void) {
 
    如果在某个线程调用thread_create的时候，其他线程调用exit退出进程
    也不用担心新创建线程的TCB没有被释放，这是因为：
-   1.pthread_create系统调用执行的时候，会将PCB中的 pending_thread +=2而不是++
+   1.pthread_create系统调用执行的时候，会将PCB中的 in_kernel_threads +=2而不是++
      自己退出的时候会将其--而不是-=2，剩下多的一点由start_thread执行
-   2.exit执行的时候是否释放PCB取决于pending_thread是否为0，更确切地讲
+   2.exit执行的时候是否释放PCB取决于in_kernel_threads是否为0，更确切地讲
      每一个线程退出的时候都需要检查PCB的exiting
-     如果是true那么递减pending_thread之后执行thread_exit
+     如果是true那么递减in_kernel_threads之后执行thread_exit
      如果这个数递减之后变为0，那么需要释放PCB
   因此在start_thread中再将当前线程加入PCB的线程列表也可以
 

@@ -35,13 +35,16 @@ tid_t pthread_join(tid_t tid) {
   struct thread* tcb = thread_current();
   struct process* pcb = tcb->pcb;
   bool found = false;
+  bool is_main = false;
   rw_lock_acquire(&pcb->threads_lock, RW_READER);
   struct thread* pos = NULL;
   list_for_each_entry(pos, &pcb->threads, prog_elem) {
     if (pos->tid == tid) {
       lock_acquire(&pos->join_lock);
-      if (pos->joined_by == NULL) 
+      if (pos->joined_by == NULL) {
         found = true;
+        is_main = is_main_thread(pos, pcb);
+      }
       lock_release(&pos->join_lock);
       break;
     }
@@ -110,14 +113,13 @@ tid_t pthread_join(tid_t tid) {
     return result;
   } else {
     pos->joined_by = tcb;
-    if (block_join) {
+    if (block_join && pcb->exiting != EXITING_MAIN) {
       tcb->joining = pos;
       lock_release(&chain->join_lock);
       thread_block();
-    } else if (immediate_join)
+    } else { /* immediate_join==true */
       lock_release(&chain->join_lock);
-    else
-      PANIC("既不是block_join, 也不是immediate_join, 那是什么?");
+    }
   }
 
   intr_set_level(old_level);
@@ -125,17 +127,21 @@ tid_t pthread_join(tid_t tid) {
   lock_acquire(&pos->join_lock);
 
   result = pos->tid;
-  // 获取线程锁之后该线程必然退出
-  ASSERT(pos->status == THREAD_ZOMBIE);
-  // 移出线程队列
-  list_remove(&pos->prog_elem);
+  if (!is_main) {
+    // 获取线程锁之后该线程必然退出
+    ASSERT(pos->status == THREAD_ZOMBIE);
+    // 移出线程队列
+    list_remove(&pos->prog_elem);
+  }
 
   // 必须将此锁移除自己的锁队列，否则会导致Page Fault
   lock_release(&pos->join_lock);
   rw_lock_release(&pcb->threads_lock, RW_WRITER);
 
-  // 释放pos的内核栈
-  DISABLE_INTR({ palloc_free_page(pos); });
-  pagedir_activate(pcb->pagedir);
+  if (!is_main) {
+    // 释放pos的内核栈
+    DISABLE_INTR({ palloc_free_page(pos); });
+    pagedir_activate(pcb->pagedir);
+  }
   return result;
 }

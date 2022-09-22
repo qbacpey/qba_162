@@ -47,6 +47,8 @@ static void pthread_exit(void) {
   lock_release(&t->join_lock);
 
   intr_disable();
+  t->pcb->active_threads--;
+
   // 释放pos的用户栈
   void* stack = ((void*)PHYS_BASE - t->stack_no * STACK_SIZE) - PGSIZE;
   bitmap_scan_and_flip(t->pcb->stacks, 1, 1, true);
@@ -97,6 +99,8 @@ void pthread_exit_main(void) {
   if (pcb->exiting == EXITING_NONE) {
     pcb->exiting = EXITING_MAIN;
     pcb->thread_exiting = tcb;
+    while (pcb->active_threads > 1)
+      thread_block();
   } else {
     exiting = true;
   }
@@ -104,18 +108,15 @@ void pthread_exit_main(void) {
 
   // 如果现时退出态比现在的更高，直接退出
   if (exiting) {
-    exit_if_exiting(pcb, false);
+    exit_if_exiting(pcb, true);
     NOT_REACHED();
   }
 
-  // 不干涉任何TCB的状态，直接阻塞
   old_level = intr_disable();
-  if (pcb->pending_thread > 1) {
-    thread_block();
-  }
-
-  ASSERT(pcb->pending_thread == 1);
+  // 不干涉任何TCB的状态，直接阻塞
   list_remove(&tcb->prog_elem);
+
+  ASSERT(pcb->in_kernel_threads == 1);
   intr_set_level(old_level);
 
   struct thread* pos = NULL;
@@ -137,6 +138,7 @@ void process_exit_exception(int exit_code) {
   pcb->exiting = EXITING_EXCEPTION;
   set_exit_code(pcb, exit_code);
   list_remove(&tcb->prog_elem);
+  // 由于之后的list_clean_each统一处理，因此不用递减
   if (pcb->exiting == EXITING_MAIN)
     exit_helper(pcb->main_thread, &pcb->threads, false);
   else if (pcb->exiting == EXITING_NORMAL)
@@ -146,7 +148,7 @@ void process_exit_exception(int exit_code) {
   struct thread* pos = NULL;
   list_clean_each(pos, &pcb->threads, prog_elem, {
     if (pos->in_handler == true)
-      pcb->pending_thread--;
+      pcb->in_kernel_threads--;
     exit_helper_remove_from_list(pos);
     palloc_free_page(pos);
   });
@@ -184,7 +186,7 @@ void process_exit_normal(int exit_code) {
     ASSERT(!is_main_thread(tcb, pcb));
     // 主线程正在Sleep 让它成为成为实质上的ZOMBIE
     exit_helper(pcb->main_thread, &pcb->threads, false);
-    pcb->pending_thread--;
+    pcb->in_kernel_threads--;
   } else {
     exiting = true;
   }
@@ -218,13 +220,13 @@ void process_exit_normal(int exit_code) {
 
   // 第一次遍历完成，阻塞直到只剩下自己
   old_level = intr_disable();
-  if (pcb->pending_thread > 1) {
+  if (pcb->in_kernel_threads > 1) {
     thread_block();
   }
   intr_set_level(old_level);
 
   // 开始第二次遍历
-  ASSERT(pcb->pending_thread == 1);
+  ASSERT(pcb->in_kernel_threads == 1);
   list_clean_each(pos, &pcb->threads, prog_elem, { palloc_free_page(pos); });
   process_exit_tail(pcb, tcb);
 }
@@ -247,28 +249,28 @@ void exit_if_exiting(struct process* pcb, bool is_pthread_exit) {
   struct thread* t = thread_current();
 
   enum intr_level old_level = intr_disable();
-  pcb->pending_thread--;
+  pcb->in_kernel_threads--;
   t->in_handler = false;
 
   if (pcb->exiting == EXITING_EXCEPTION) { /* 外部中断已经将进程所有资源释放 */
     thread_exit_flag = true;
-    if (pcb->pending_thread == 0) /* 可能外部中断有多个遗留线程，仅`pending_thread==0`时才清除 */
+    if (pcb->in_kernel_threads ==
+        0) /* 可能外部中断有多个遗留线程，仅`in_kernel_threads==0`时才清除 */
       free_pcb = true;
-  } else if (pcb->exiting == EXITING_NORMAL ||
-             pcb->exiting == EXITING_MAIN) { /* `process_exit`阻塞 */
+  } else if (pcb->exiting == EXITING_NORMAL) { /* `process_exit`阻塞 */
     pthread_exit_flag = true;
-    if (pcb->pending_thread == 1) {
-      if (pcb->thread_exiting != NULL) /* 优先唤醒thread_exiting */
-        thread_unblock(pcb->thread_exiting);
-      else /* 唤醒pthread_main_exiting */
-        thread_unblock(pcb->main_thread);
-    }
+    // 唤醒thread_exiting
+    if (pcb->in_kernel_threads == 1)
+      thread_unblock(pcb->thread_exiting);
+  } else if (pcb->exiting == EXITING_MAIN) { /* 主线程执行pthread_main_exit */
+    // 唤醒pthread_main_exiting后继续执行
+    if (is_pthread_exit && pcb->active_threads == 2)
+      thread_unblock(pcb->main_thread);
   }
   intr_set_level(old_level);
 
   if (thread_exit_flag) {
     t->pcb = NULL;
-
     if (free_pcb) {
       while (!list_empty(&t->lock_queue))
         list_pop_front(&t->lock_queue);
@@ -339,8 +341,9 @@ inline static void exit_helper_remove_from_list(struct thread* pos) {
 static void process_exit_tail(struct process* pcb, struct thread* tcb) {
   // 将自己的优先级设置为系统最大值
   // if (!intr_context()) {
-  //   ASSERT(pcb->pending_thread == 1);
+  //   ASSERT(pcb->in_kernel_threads == 1);
   // }
+  printf("%s: exit(%d)\n", pcb->process_name, pcb->exit_code);
 
   struct thread* cur = tcb;
   struct process* pcb_to_free = pcb;
@@ -420,12 +423,12 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
 
   cur->pcb = NULL;
   /* 就剩下自己了 */
-  if (pcb_to_free->pending_thread == 1) {
-    while(!list_empty(&cur->lock_queue))
+  if (pcb_to_free->in_kernel_threads == 1) {
+    while (!list_empty(&cur->lock_queue))
       list_pop_front(&cur->lock_queue);
     free(pcb_to_free);
   } else {
-    pcb_to_free->pending_thread--;
+    pcb_to_free->in_kernel_threads--;
   }
   // sema_up(&temporary);
   thread_exit();

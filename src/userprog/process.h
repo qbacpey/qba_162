@@ -190,7 +190,8 @@ struct process {
   enum exiting_status exiting;   /* 退出事件等级 */
   int32_t exit_code;             /* 临时进程退出码 */
   struct thread* thread_exiting; /* 当前是否有函数正在执行process_exit */
-  uint32_t pending_thread;       /* 当前有多少个内核线程还在执行 */
+  uint32_t in_kernel_threads;    /* 有多少线程位于内核中？ */
+  uint32_t active_threads;       /* 有多少线程位于尚未退出中？ */
 
   struct thread* main_thread; /* Pointer to main thread */
 };
@@ -216,6 +217,5 @@ tid_t pthread_join(tid_t);
 void wake_up_joiner(struct thread*);
 void exit_if_exiting(struct process*, bool);
 void pthread_exit_main(void);
-
 
 #endif /* userprog/process.h */
