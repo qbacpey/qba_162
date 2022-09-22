@@ -34,11 +34,7 @@ Group X (replace X with your group number)
     - **tests/filesys/base/syn-read**
     - **tests/filesys/base/syn-write**
 - threads
-  - priority
-    - **tests/threads/priority-donate-sema**
   - smfs
-- userprog
-  - **tests/userprog/write-bad-ptr**
 
 
 

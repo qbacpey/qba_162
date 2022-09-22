@@ -274,8 +274,7 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
 void thread_block(void) {
   ASSERT(!intr_context());
   ASSERT(intr_get_level() == INTR_OFF);
-
-  thread_current()->queue = NULL;
+  
   thread_current()->status = THREAD_BLOCKED;
   schedule();
 }

@@ -391,7 +391,10 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
   struct thread* t = NULL;
   if (!list_empty(&cond->waiters)) {
     list_sort(&cond->waiters, &thread_before, &grater_thread_pri);
-    t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
+    DISABLE_INTR({
+      t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
+      t->queue = NULL;
+    });
     thread_unblock(t);
   }
   if (t != NULL && !intr_context() && t->e_pri > thread_get_priority())
@@ -410,7 +413,10 @@ void cond_broadcast(struct condition* cond, struct lock* lock) {
   struct thread* t = NULL;
   bool flag = false;
   while (!list_empty(&cond->waiters)) {
-    t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
+    DISABLE_INTR({
+      t = list_entry(list_pop_front(&cond->waiters), struct thread, elem);
+      t->queue = NULL;
+    });
     thread_unblock(t);
     if (t->e_pri > thread_get_priority()) {
       flag = true;
