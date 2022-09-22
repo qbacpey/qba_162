@@ -13,16 +13,8 @@ Group X (replace X with your group number)
 
 下面是本项目需要通过的测试（划去表示已通过）：
 - multithreading
-  - pcb
-    - **tests/userprog/multithreading/pcb-syn**
-  - arr
-    - **tests/userprog/multithreading/arr-search**
   - multi-oom-mt
     - **tests/userprog/multithreading/multi-oom-mt**
-- filesys
-  - syn
-    - **tests/filesys/base/syn-read**
-    - **tests/filesys/base/syn-write**
 - threads
   - smfs
 
