@@ -17,9 +17,6 @@ Group X (replace X with your group number)
     - **tests/userprog/multithreading/pcb-syn**
   - arr
     - **tests/userprog/multithreading/arr-search**
-  - exit
-    - **tests/userprog/multithreading/exit-clean-1**
-    - **tests/userprog/multithreading/exit-clean-2**
   - multi-oom-mt
     - **tests/userprog/multithreading/multi-oom-mt**
 - filesys

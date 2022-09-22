@@ -51,9 +51,10 @@ static void pthread_exit(void) {
 
   // 释放pos的用户栈
   void* stack = ((void*)PHYS_BASE - t->stack_no * STACK_SIZE) - PGSIZE;
-  bitmap_scan_and_flip(t->pcb->stacks, 1, 1, true);
+  bitmap_set(t->pcb->stacks, t->stack_no, false);
   palloc_free_page(pagedir_get_page(t->pcb->pagedir, stack));
   pagedir_clear_page(t->pcb->pagedir, stack);
+  process_activate();
 
   exit_helper_remove_from_list(t);
   t->queue = NULL;
@@ -280,6 +281,8 @@ void exit_if_exiting(struct process* pcb, bool is_pthread_exit) {
   } else if (pthread_exit_flag) {
     pthread_exit();
   }
+  
+  process_activate();
 }
 
 /**

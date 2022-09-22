@@ -29,17 +29,17 @@ void file_io(void* arg_ UNUSED) {
 /* Syn Init threads continuously initialize new locks and semaphores.
    These locks and semas are also acquired to ensure initialization succeeded */
 void syn_init(void* arg_) {
-  int* thread_num = (int*)arg_;
-  for (int i = 0; i < SYN_MAX; i++) {
-    lock_t* lock = &lock_store[i + (*thread_num * SYN_MAX)];
-    sema_t* sema = &sema_store[i + (*thread_num * SYN_MAX)];
-    lock_check_init(lock);
-    lock_acquire(lock);
-    lock_release(lock);
-    sema_check_init(sema, 1);
-    sema_down(sema);
-    sema_up(sema);
-  }
+  // int* thread_num = (int*)arg_;
+  // for (int i = 0; i < SYN_MAX; i++) {
+  //   lock_t* lock = &lock_store[i + (*thread_num * SYN_MAX)];
+  //   sema_t* sema = &sema_store[i + (*thread_num * SYN_MAX)];
+  //   lock_check_init(lock);
+  //   lock_acquire(lock);
+  //   lock_release(lock);
+  //   sema_check_init(sema, 1);
+  //   sema_down(sema);
+  //   sema_up(sema);
+  // }
 }
 
 void test_main(void) {

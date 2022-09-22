@@ -261,7 +261,6 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
 
   if (!beneath) {
-    printf("%s: exit(%d)\n", pcb->process_name, f->eax);
     process_exit_normal(f->eax);
   }
   // 系统调用过后直接执行process_exit不需要执行此函数
@@ -555,6 +554,7 @@ static tid_t handler_pthread_join(tid_t tid, struct process* pcb) { return pthre
 static bool handler_lock_init(lock_t* lock, struct process* pcb) {
   struct rw_lock* locks_lock = &(pcb->locks_lock);
   struct list* locks_tab = &(pcb->locks_tab);
+
   rw_lock_acquire(locks_lock, RW_WRITER);
 
   struct registered_lock* lock_pos = NULL;
@@ -576,7 +576,9 @@ static bool handler_lock_init(lock_t* lock, struct process* pcb) {
   lock_pos->lid = lock;
   lock_init(&(lock_pos->lock));
   list_push_front(locks_tab, &(lock_pos->elem));
+
   rw_lock_release(locks_lock, RW_WRITER);
+
   return true;
 }
 

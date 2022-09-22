@@ -85,7 +85,7 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
   tid_t tid = thread_create("sub thread", PRI_DEFAULT, &start_pthread, init_tcb);
   if (tid == TID_ERROR) {
     free(init_tcb);
-    bitmap_scan_and_flip(pcb->stacks, stack_no, 1, false);
+    bitmap_set(pcb->stacks, stack_no, false);
   }
   sema_down(&finished);
   return tid;
@@ -137,6 +137,7 @@ done:
   sema_up(init_tcb->finished);
   free(init_tcb);
   exit_if_exiting(pcb, false);
+  process_activate();
   asm volatile("movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
 }
