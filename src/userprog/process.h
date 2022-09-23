@@ -46,8 +46,9 @@ struct registered_sema {
  * 
  */
 struct file_desc {
-  uint32_t file_desc; /* 文件描述符，从3开始 */
-  struct file* file;  /* 文件指针，务必注意释放问题 */
+  uint32_t file_desc;   /* 文件描述符，从3开始 */
+  struct file* file;    /* 文件指针，务必注意释放问题 */
+  struct rw_lock lock; /* 文件锁 */
   struct list_elem elem;
 };
 

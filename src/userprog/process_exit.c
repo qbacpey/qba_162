@@ -382,9 +382,7 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
     sema_up(pcb_to_free->filesys_sema); /* 文件系统执行操作时发生page fault */
   }
 
-  sema_down(filesys_sema);
   file_close(pcb_to_free->exec);
-  sema_up(filesys_sema);
 
   /* 释放文件描述符表，必须使用 NULL 进行初始化 */
   struct file_desc* file_pos = NULL;
@@ -393,14 +391,20 @@ static void process_exit_tail(struct process* pcb, struct thread* tcb) {
     free(file_pos);
   });
 
+  // 弹出列表中的所有锁回复记录，以免free错误访问
+  while (!list_empty(&cur->lock_queue))
+    list_pop_front(&cur->lock_queue);
+
   // 释放进程锁列表
-  if (list_empty(&pcb_to_free->locks_tab)) {
+  if (!list_empty(&pcb_to_free->locks_tab)) {
     struct registered_lock* lock_pos = NULL;
-    list_clean_each(lock_pos, &(pcb_to_free->locks_tab), elem, { free(lock_pos); });
+    list_clean_each(lock_pos, &(pcb_to_free->locks_tab), elem, {
+      free(lock_pos);
+    });
   }
   // 释放进程信号量列表
-  if (list_empty(&pcb_to_free->semas_tab)) {
-    struct registered_lock* sema_pos = NULL;
+  if (!list_empty(&pcb_to_free->semas_tab)) {
+    struct registered_sema* sema_pos = NULL;
     list_clean_each(sema_pos, &(pcb_to_free->semas_tab), elem, { free(sema_pos); });
   }
 

@@ -350,6 +350,7 @@ static int handler_open(uint32_t* args, struct process* pcb) {
     ASSERT(pcb->files_next_desc >= 3);
     struct file_desc* new_file_desc = malloc(sizeof(struct file_desc));
     new_file_desc->file = new_file;
+    rw_lock_init(&new_file_desc->lock);
 
     lock_acquire(files_tab_lock);
     new_file_desc->file_desc = pcb->files_next_desc;
@@ -375,11 +376,11 @@ static int handler_close(uint32_t* args, struct process* pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      sema_down(filesys_sema);
-      pcb->filesys_sema = filesys_sema;
+
+      rw_lock_acquire(&pos->lock, RW_WRITER);
       file_close(pos->file);
-      sema_up(filesys_sema);
-      pcb->filesys_sema = NULL;
+      rw_lock_release(&pos->lock, RW_WRITER);
+
       result = 0;
       list_remove(&(pos->elem));
       free(pos);
@@ -476,11 +477,9 @@ static int handler_read(uint32_t* args, struct process* pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      sema_down(filesys_sema);
-      pcb->filesys_sema = filesys_sema;
+      rw_lock_acquire(&pos->lock, RW_READER);
       off = file_read(pos->file, (void*)args[2], args[3]);
-      sema_up(filesys_sema);
-      pcb->filesys_sema = NULL;
+      rw_lock_release(&pos->lock, RW_READER);
       break;
     }
   }
@@ -505,11 +504,9 @@ static int handler_write(uint32_t* args, struct process* pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      sema_down(filesys_sema);
-      pcb->filesys_sema = filesys_sema;
+      rw_lock_acquire(&pos->lock, RW_WRITER);
       off = file_write(pos->file, (void*)args[2], args[3]);
-      sema_up(filesys_sema);
-      pcb->filesys_sema = NULL;
+      rw_lock_release(&pos->lock, RW_WRITER);
       break;
     }
   }
@@ -573,6 +570,12 @@ static bool handler_lock_init(lock_t* lock, struct process* pcb) {
 
   malloc_type(lock_pos);
   barrier();
+
+  if(lock_pos == NULL){
+    rw_lock_release(locks_lock, RW_WRITER);
+    return false;
+  }
+
   lock_pos->lid = lock;
   lock_init(&(lock_pos->lock));
   list_push_front(locks_tab, &(lock_pos->elem));
@@ -604,7 +607,7 @@ static bool handler_lock_acquire(lock_t* lock, struct process* pcb) {
     }
   }
 
-  if (!found || lock_held_by_current_thread(&(lock_pos->lock))) {
+  if (!found || lock_held_by_current_thread(&lock_pos->lock)) {
     rw_lock_release(locks_lock, RW_READER);
     return false;
   }
@@ -669,12 +672,17 @@ static bool handler_sema_init(sema_t* sema, int val, struct process* pcb) {
 
   malloc_type(sema_pos);
   barrier();
+  if(sema_pos == NULL){
+    rw_lock_release(semas_lock, RW_WRITER);
+    return false;
+  }
   sema_pos->sid = sema;
   sema_init(&(sema_pos->sema), val);
   list_push_front(semas_tab, &(sema_pos->elem));
   rw_lock_release(semas_lock, RW_WRITER);
   return true;
 }
+
 static bool handler_sema_down(sema_t* sema, struct process* pcb) {
   struct rw_lock* semas_lock = &(pcb->semas_lock);
   struct list* semas_tab = &(pcb->semas_tab);
