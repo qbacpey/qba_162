@@ -113,7 +113,7 @@ tid_t pthread_join(tid_t tid) {
     return result;
   } else {
     pos->joined_by = tcb;
-    if (block_join && pcb->exiting != EXITING_MAIN) {
+    if (block_join && (pcb->exiting != EXITING_MAIN || !is_main)) {
       tcb->joining = pos;
       lock_release(&chain->join_lock);
       thread_block();
