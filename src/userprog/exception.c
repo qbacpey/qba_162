@@ -80,7 +80,11 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
-      process_exit_exception(-1);
+      DISABLE_INTR({
+        thread_current()->pcb->in_kernel_threads++;
+        thread_current()->in_handler = true;
+      });
+      process_exit_normal(-1);
       NOT_REACHED();
 
     case SEL_KCSEG:

@@ -23,7 +23,7 @@
 #include "userprog/filesys_lock.h"
 #include "bitmap.h"
 
-static void process_exit_tail(struct process*, struct thread*);
+static NO_INLINE void process_exit_tail(struct process*, struct thread*);
 inline static void set_exit_code(struct process*, int32_t);
 inline static void exit_helper(struct thread*, struct list*, bool);
 inline static void exit_helper_remove_from_list(struct thread*);
@@ -136,6 +136,8 @@ void process_exit_exception(int exit_code) {
 
   struct thread* tcb = thread_current();
   struct process* pcb = tcb->pcb;
+
+  enum intr_level old_level = intr_disable();
   pcb->exiting = EXITING_EXCEPTION;
   set_exit_code(pcb, exit_code);
   list_remove(&tcb->prog_elem);
@@ -145,7 +147,6 @@ void process_exit_exception(int exit_code) {
   else if (pcb->exiting == EXITING_NORMAL)
     exit_helper(pcb->thread_exiting, &pcb->threads, true);
 
-  pcb->exiting = EXITING_EXCEPTION;
   struct thread* pos = NULL;
   list_clean_each(pos, &pcb->threads, prog_elem, {
     if (pos->in_handler == true)
@@ -153,6 +154,7 @@ void process_exit_exception(int exit_code) {
     exit_helper_remove_from_list(pos);
     palloc_free_page(pos);
   });
+  intr_set_level(old_level);
 
   process_exit_tail(pcb, tcb);
 }
@@ -341,7 +343,7 @@ inline static void exit_helper_remove_from_list(struct thread* pos) {
  * 如果不是，那么就还是老老实实的获取锁再修改比较好
  * 
  */
-static void process_exit_tail(struct process* pcb, struct thread* tcb) {
+static NO_INLINE void process_exit_tail(struct process* pcb, struct thread* tcb) {
   // 将自己的优先级设置为系统最大值
   // if (!intr_context()) {
   //   ASSERT(pcb->in_kernel_threads == 1);
