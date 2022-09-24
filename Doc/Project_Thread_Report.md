@@ -415,10 +415,38 @@ enum exiting_status {
 
 注意，代码中设置`struct thread* thread_exiting`这一步是非常有必要的，如果线程在`process_exit_normal`的第一次遍历和第二次遍历的间歇，内核态线程触发`process_exit_exception`，那么异常处理程序就需要使用这个字段将`process_exit_normal`线程清除
 
+同时，由于此函数有可能会在用户代码触发异常时被调用。因此在`exception.c`处添加了和`syscall.c`相同的推出代码
+
 ###### `process_exit_exception`
 
 `process_exit_normal`的执行就粗暴许多：
 - 根据现时退出等级，决定是否需要做一些额外的工作；
   - 比如说将`struct thread* thread_exiting`放回到线程队列中统一处理；
-- 考虑到有可能会遗留一些没有被放到线程队列中的线程（`start_pthread`未执行就触发异常），因此处理线程队列的时候需要维护`in_handler`字段；
+- 考虑到有可能会遗留一些没有被放到线程队列中的线程（`start_pthread`未执行就触发异常），因此处理线程队列的时候需要维护`in_kernel_threads`字段；
 
+###### `process_exit_tail`
+
+执行统一的进程资源清理逻辑，前身是`process_exit`，现在成了仅会被上面三个退出函数调用的静态函数
+
+为什么三个进程退出函数无需关注用户栈清理呢，根本原因是只要登记到进程页目录的虚拟地址（及其物理内存页）都能被如下代码块清除：
+~~~c
+  /* Destroy the current process's page directory and switch back
+     to the kernel-only page directory. */
+  pd = pcb_to_free->pagedir;
+  if (pd != NULL) {
+    /* Correct ordering here is crucial.  We must set
+         cur->pcb->pagedir to NULL before switching page directories,
+         so that a timer interrupt can't switch back to the
+         process page directory.  We must activate the base page
+         directory before destroying the process's page
+         directory, or our active page directory will be one
+         that's been freed (and cleared). */
+    pcb_to_free->pagedir = NULL;
+    pagedir_activate(NULL);
+    pagedir_destroy(pd);
+  }
+~~~
+
+同时要注意，为了避免由`free`本身结构导致的Page Fault，需要在弹出线程当前持有的所有锁之后再释放信号量和锁队列
+
+其他基本和原来`process_exit`的设计相同
