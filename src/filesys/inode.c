@@ -33,7 +33,9 @@ struct inode {
   struct inode_disk data; /* Inode content. */
 };
 
-/* Returns the block device sector that contains byte offset POS
+/* TODO 实现需修改，估计需要加一段“从Buffer Cache中获取Inode”的代码 
+
+  Returns the block device sector that contains byte offset POS
    within INODE.
    计算POS在文件INODE中位于哪一个扇区中，返回该扇区下标
 
