@@ -11,7 +11,8 @@
 #define BLOCK_SECTOR_SIZE 512
 
 /* Index of a block device sector.
-   Good enough for devices up to 2 TB. */
+   Good enough for devices up to 2 TB. 
+   扇区在存储设备中的下标 */
 typedef uint32_t block_sector_t;
 
 /* Format specifier for printf(), e.g.:

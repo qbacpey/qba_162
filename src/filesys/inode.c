@@ -35,6 +35,8 @@ struct inode {
 
 /* Returns the block device sector that contains byte offset POS
    within INODE.
+   计算POS在文件INODE中位于哪一个扇区中，返回该扇区下标
+
    Returns -1 if INODE does not contain data for a byte at offset
    POS. */
 static block_sector_t byte_to_sector(const struct inode* inode, off_t pos) {
@@ -69,15 +71,19 @@ bool inode_create(block_sector_t sector, off_t length) {
 
   disk_inode = calloc(1, sizeof *disk_inode);
   if (disk_inode != NULL) {
+    /* 所需使用的扇区个数 */
     size_t sectors = bytes_to_sectors(length);
     disk_inode->length = length;
     disk_inode->magic = INODE_MAGIC;
+    /* 在Free Map中分配指定数目的的扇区，开始位置为disk_inode->start */
     if (free_map_allocate(sectors, &disk_inode->start)) {
+      /* 将inode_disk写入到设备中 */
       block_write(fs_device, sector, disk_inode);
       if (sectors > 0) {
         static char zeros[BLOCK_SECTOR_SIZE];
         size_t i;
 
+        /* 将所有的数据扇区写入到文件中 */
         for (i = 0; i < sectors; i++)
           block_write(fs_device, disk_inode->start + i, zeros);
       }
@@ -161,7 +167,31 @@ void inode_remove(struct inode* inode) {
 
 /* Reads SIZE bytes from INODE into BUFFER, starting at position OFFSET.
    Returns the number of bytes actually read, which may be less
-   than SIZE if an error occurs or end of file is reached. */
+   than SIZE if an error occurs or end of file is reached. 
+   
+   简而言之就是将文件INODE中从OFFSET开始，长度为SIZE的数据读取到BUFFER中 
+
+   实现的关键在于OFFSET不仅可能是文件的开始，也可能是中间某个扇区的起始位置
+   还有可能是位于某个扇区的中间，这时候就要注意从OFFSET开始将数据读取
+   
+   文件的结束位置和扇区边界之间也需要注意，文件可能在扇区的边界结束，也有可能
+   在某个扇区的中间位置结束，这时候就需要注意不要将文件结尾与扇区的边界之间的
+   垃圾值读取到Buffer中（Buffer的大小可能只有SIZE，读取过多数据可能会溢出）
+
+   此外，还有可能OFFSET+SIZE结束在某个扇区的中间，这时候也要注意不要将垃圾值
+   读取到Buffer中
+   
+   综上，此函数整体读取过程可被归结如下：
+   1. 计算chunk_size：本轮循环中需要读取到Buffer中、位于当前聚焦扇区中的数据量：
+    1. 如果chunk_size恰好为BLOCK_SECTOR_SIZE，那么可以直接将聚焦扇区的所有
+       内容都读取到Buffer中，此时聚焦扇区的所有内容都需要读取到文件中；
+    2. 如果chunk_size不为BLOCK_SECTOR_SIZE，那么聚焦扇区可能有如下三种可能性：
+       1. OFFSET开始于聚焦扇区的中间；
+       2. 聚焦扇区包含文件的末尾；
+       3. OFFSET+SIZE的结束位置位于聚焦扇区的中间； 
+       总而言之，只需要将聚焦扇区的一部分读取到Buffer中
+   2. 如果chunk_size恰好为BLOCK_SECTOR_SIZE，那么可以直接调用block_read将
+      整个扇区的数据都读取到Buffer中。相对的，需要将bounce中的内容读取到Buffer中；*/
 off_t inode_read_at(struct inode* inode, void* buffer_, off_t size, off_t offset) {
   uint8_t* buffer = buffer_;
   off_t bytes_read = 0;
@@ -170,6 +200,7 @@ off_t inode_read_at(struct inode* inode, void* buffer_, off_t size, off_t offset
   while (size > 0) {
     /* Disk sector to read, starting byte offset within sector. */
     block_sector_t sector_idx = byte_to_sector(inode, offset);
+    /* 需从聚焦扇区内部的什么位置开始读取数据 */
     int sector_ofs = offset % BLOCK_SECTOR_SIZE;
 
     /* Bytes left in inode, bytes left in sector, lesser of the two. */
@@ -210,6 +241,8 @@ off_t inode_read_at(struct inode* inode, void* buffer_, off_t size, off_t offset
 /* Writes SIZE bytes from BUFFER into INODE, starting at OFFSET.
    Returns the number of bytes actually written, which may be
    less than SIZE if end of file is reached or an error occurs.
+
+   现在的实现如果在文件末尾继续写入数据的话，不会对文件进行拓展
    (Normally a write at end of file would extend the inode, but
    growth is not yet implemented.) */
 off_t inode_write_at(struct inode* inode, const void* buffer_, off_t size, off_t offset) {
@@ -268,7 +301,8 @@ off_t inode_write_at(struct inode* inode, const void* buffer_, off_t size, off_t
 }
 
 /* Disables writes to INODE.
-   May be called at most once per inode opener. */
+   May be called at most once per inode opener.
+   每个开启此文件的进程只可调用一次此函数 */
 void inode_deny_write(struct inode* inode) {
   inode->deny_write_cnt++;
   ASSERT(inode->deny_write_cnt <= inode->open_cnt);
