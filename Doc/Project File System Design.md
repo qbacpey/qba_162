@@ -16,6 +16,22 @@
   + 优化一：可以使用一个`timer_sleep`周期性地将数据写入到磁盘中；
   + 优化二：可以实现Read-ahead，当文件的某个扇区被读取的时候，自动将邻接的下一个扇区也读取到Buffer Cache中；
 
+下述所有操作队列的函数执行时必须**持有队列锁**：
+
+- `byte_to_sector`：利用`inode`以及文件中的偏移量，计算出文件中该偏移量所在扇区的下标；
+  - 首先执行[扇区查找函数](#扇区查找函数)中的逻辑，将Inode所在扇区加载到Buffer中，得到对应的`meta`；
+  - 现在`meta`的`block`指向存有Inode的Cache Buffer Block，此时即可利用偏移量[找到合适的扇区下标](#Extensible Files)；
+- `inode_read_at/inode_write_at/inode_open`：在Inode的指定位置进行读写操作；
+  - 调用`byte_to_sector`获取文件中指定偏移量所在扇区的下标；
+  - 利用`byte_to_sector`返回的扇区下标执行[扇区查找函数](#扇区查找函数)，将与目标下标相对应的扇区加载到Buffer中；
+  - 此时获取的`meta`指针应指向目标扇区位于Cache Buffer中的缓存，确保[同步](#扇区查找函数中的同步)的情况下读写Buffer即可；
+- `inode_create`：创建Inode，直接将其覆写在指定扇区中；
+  - 免去正向遍历，直接反向遍历，获取一个干净的`meta`；
+  - 同时无需将指定扇区中的内容读取到Cache Buffer中（[只写](#读取旗标)）；
+  - 注意在释放队列锁之前持有写者锁，随后再将新的Inode覆写到Cache Buffer中（`dirty=true`）；
+- `inode_close`：可能需要将Inode写回到磁盘中；
+  - 如果`meta.dirty == true`的话，需要将其写入到磁盘中；
+
 ### Data Structures and Functions
 
 #### Second Chance List
@@ -46,7 +62,6 @@
    static struct lock sc_lock; /* 队列共用锁 */
    ~~~
 
-   
 
 #### Buffer Cache Metadata
 
@@ -125,30 +140,9 @@ struct meta {
 3. 由于`dirty==false`，因此无需将该Block写入磁盘；
 4. 此时就可将目标磁盘中的内容读取到对应的Block中，修改各元数据字段，并进行[队列移动操作](#队列操作)；
 
-#### Inode函数
-
-下述所有操作队列的函数执行时必须**持有队列锁**：
-
-- `byte_to_sector`：利用`inode`以及文件中的偏移量，计算出文件中该偏移量所在扇区的下标；
-  - 首先执行[扇区查找函数](#扇区查找函数)中的逻辑，将Inode所在扇区加载到Buffer中，得到对应的`meta`；
-  - 现在`meta`的`block`指向存有Inode的Cache Buffer Block，此时即可利用偏移量[找到合适的扇区下标](#Extensible Files)；
-- `inode_read_at`和`inode_write_at`：在Inode的指定位置进行读写操作；
-  - 调用`byte_to_sector`获取文件中指定偏移量所在扇区的下标；
-  - 利用`byte_to_sector`返回的扇区下标执行[扇区查找函数](#扇区查找函数)，将与目标下标相对应的扇区加载到Buffer中；
-  - 此时获取的`meta`指针应指向目标扇区位于Cache Buffer中的缓存，确保[同步](#扇区查找函数中的同步)的情况下读写Buffer即可；
-- `inode_create`：创建Inode，直接将其覆写在指定扇区中；
-  - 免去正向遍历，直接反向遍历，获取一个干净的`meta`；
-  - 同时无需将指定扇区中的内容读取到Cache Buffer中（[只写](#读取旗标)）；
-  - 注意在释放队列锁之前持有写者锁，随后再将新的Inode覆写到Cache Buffer中；
-- `inode_open`：读取指定扇区中的内容，将其作为Inode解析；
-  - 调用`byte_to_sector`获取文件中指定偏移量所在扇区的下标；
-  - 利用`byte_to_sector`返回的扇区下标执行[扇区查找函数](#扇区查找函数)，将与目标下标相对应的扇区加载到Buffer中；
-- `inode_close`：可能需要将Inode写回到磁盘中；
-  - 如果`meta.dirty == true`的话，需要将其写入到磁盘中；
-
 #### 扇区查找函数
 
-> 函数功能：确保指定扇区（可能是Inode，也可能是文件块）被加载到Cache Buffer中，随后返回与该扇区对应的`meta`指针
+> 函数功能：确保指定扇区被加载到Cache Buffer中，返回与该扇区对应的`meta`指针
 >
 > 函数参数：
 >
@@ -328,6 +322,12 @@ struct meta {
 ----------
 ## Extensible Files
 
+需要对`inode_write_at`的实现稍加修改：
+
+1. 读取Inode时检查是否需要拓展文件，如果需要则获取Inode的写者锁；
+2. 调用[间接块Resize函数](#间接块Resize函数)将文件延长为目标大小；
+3. 此时文件已被扩大到足以容纳所有待写入内容，可直接执行原有写入新数据的逻辑；
+
 ### Data Structures and Functions
 
 需要修改两个数据结构：
@@ -347,7 +347,7 @@ struct meta {
 
 ~~~c
 struct indirect_blk_t {
-   block_sector_t direct_ptr[128];
+   block_sector_t direct_ary[128];
 };
 ~~~
 
@@ -357,7 +357,7 @@ struct indirect_blk_t {
 
 ~~~c
 struct dbindirect_blk_t {
-	block_sector_t indirect_ptr[128];
+	block_sector_t indirect_ary[128];
 };
 ~~~
 
@@ -371,9 +371,9 @@ struct inode_disk {
   block_sector_t start; /* First data sector. */
   off_t length;         /* File size in bytes. */
   unsigned magic;       /* Magic number. */
-  block_sector_t direct_ptr[64]; /* 直接块的下标 */
-  block_sector_t indirect_prt[32]; /* 间接块的下标 */
-  block_sector_t dbindirect_ptr; /* 二级间接块的下标 */
+  block_sector_t direct_ary[64]; /* 直接块的下标 */
+  block_sector_t indirect_ary[32]; /* 间接块的下标 */
+  block_sector_t dbindirect_ary; /* 二级间接块的下标 */
   uint32_t unused[125 - 64 - 32 -1]; /* Not used. */
 };
 ~~~
@@ -423,6 +423,8 @@ struct inode {
 
 #### 文件延长
 
+> 核心是将**扩大文件**和**向文件中写入数据**这两个语义完全分开来看
+
 要求：
 
 - 只要磁盘有空余空间且文件大小不超过8 MiB，文件即可延长；
@@ -457,76 +459,109 @@ struct inode {
 
 ##### 如何延长文件？
 
-核心是将**扩大文件**和**向文件中写入数据**这两个语义完全分开来看。延长文件时，仿照Dic 8中的逻辑，计算将文件拓展为指定大小所需分配的扇区数量的同时，修改Inode内存副本中的指针：
+需将：
+
++ 旧EOF与写入起点之间的扇区使用Sparse ﬁles扇区进行填补，将；
++ 写入起点与新EOF之间的扇区使用实际的Free Sector进行填补；
+
+考虑到这两项工作的相似性，可以使用[间接块Resize函数](#间接块Resize函数)的实际分配旗标统一处理它们
+
+延长文件时，仿照Dic 8中的逻辑，计算将文件拓展为指定大小所需分配的扇区数量的同时，修改Inode内存副本中的指针：
 
 + 延长后大小可被直接指针所覆盖：将EOF所在扇区之后的直接指针设置为Sparse ﬁles扇区；
-+ 延长后大小可被间接指针所覆盖：计算所需间接块的数目，调用[间接块分配函数](#间接块分配函数)：
-  + 函数会在`free_map`中请求一个扇区作为间接块；
-  + 接收一个参数，用于描述需要让间接块中的多少个指针指向Sparse ﬁles扇区，其余用0填补；
-+ 延长后大小不可被间接指针所覆盖：将剩余需要的空间传递给二级间接块分配函数：
++ 延长后大小可被间接指针所覆盖：计算所需间接块的数目，调用[间接块Resize函数](#间接块Resize函数)；
++ 延长后大小不可被间接指针所覆盖：将剩余需要的空间传递给二级间接块Resize函数；
   + 函数会在`free_map`中请求一个扇区作为二级间接块；
   + 接收一个参数，用于描述需要申请多少空间，随后的逻辑和第二步类似；
 
-此时文件旧EOF和新EOF之间的扇区都指向Sparse ﬁles扇区，向其中写入数据就会触发这里的[Zero-out逻辑](#Sparse ﬁles)
+此时文件旧EOF和新写入起点之间的扇区都指向Sparse ﬁles扇区，向其中写入数据就会触发这里的[Zero-out逻辑](#Sparse ﬁles)
 
-##### 间接块分配函数
+##### 间接块Resize函数
 
-> 函数功能：
+> 函数功能：接收一个`off_t`，计算保存这个`off_t`需要多少直接块，记作`n`，同时修改参数指针指向的`indirect_blk_t`。执行失败时确保不会新分配任何扇区
 >
-> 1. 接收一个`off_t`，计算保存这个`off_t`需要多少直接块，记作`n`；
-> 2. 调用`free_map_alloc`申请一个扇区作为间接块；
-> 3. 申请一个`indirect_blk_t`；
-> 4. 将`indirect_blk_t[0:n)`设置为Sparse ﬁles扇区，数组其余空间用0填补；
-> 5. 将`n`递减“分配的空间”（使用的直接块 * 512 Byte）并返回；
+> + 根据“实际分配旗标”，使用Sparse ﬁles扇区或空余扇区填满`[0, n)`：
+>   + `true`：间接块中所有扇区指针都来自`free_map`，不使用Sparse ﬁles扇区；
+>   + `flase`：可使用Sparse ﬁles扇区代替实际空余扇区；
+> + 确保`[n, 128)`之间的所有数组元素都为`0`，如果该位置原先存在数据：
+>   + Sparse ﬁles扇区：直接赋值为`0`即可；
+>   + 实际扇区：把它从`free_map`中释放掉；
 >
-> 函数说明：
+> 函数参数：
 >
-> 如果`off_t`大于64 KiB，那么`indirect_blk_t`中的所有内容都为Sparse ﬁles扇区
+> + `indirect_blk_t *`：一个指向Cache Buffer的指针，内容为间接块的`meta`；
+> + 实际分配旗标：使用Sparse ﬁles扇区或空余扇区填充新扇区；
+>   + 执行过程中如果申请失败，需要将新申请的所有扇区都释放；
+> + `off_t`：间接块的新大小，用于计算需要多少个直接块存放此值；
+>   + 等于`0`说明需要释放此间接块中的全部扇区；
+>   + 位于中间值时向上取整并按照上面提到的逻辑进行合理的Resize操作；
+>   + 等于`64 * 1024`或以上，说明需要将间接块中的所有地方都填满；
 >
-> 函数的正确调用方式是将目标所需分配空间的大小传递给此函数，直到：
->
-> + 返回值为0；
-> + Inode间接块指针耗尽；
->
-> 随后调用二级间接块分配函数
+> 返回值：执行成功与否
+
+无论是分配间接块还是释放间接块中都可以调用此函数，但是此函数必须在如下场景中被调用：
+
++ Caller申请新扇区并调用Evict Block函数腾出一个新的`meta`，将新的扇区下标赋值给`meta`；
++ 确保读写`meta`时同步（持有读者锁之后再调用此函数）；
++ 调用此函数，利用`meta.block`将Cache Buffer当成`indirect_blk_t`并对其进行修改（写入完毕需要递减`worker_cnt`）；
+  + 如果成功，重复此过程直到完成申请目标；
+  + 如果失败：
+    + 首先释放该`meta`的扇区（操作Free Map即可）；
+    + 随后调用此函数，释放所有新申请的间接块；
+    + 重复上述两步直到回到原点；
+
+无论是Inode本体申请间接块，还是二级间接块申请间接块，亦或者是Inode申请二级间接块，都需要遵循上述逻辑
 
 #### 磁盘空间耗尽
+
+要求：
 
 - 确保磁盘空间耗尽时能回滚到系统之前的安全状态；
 - Inode的状态需要始终合法；
   - 确认文件所有的新空间都分配成功之后才将Inode副本写入到Cache Buffer中；
-- 避免磁盘空间泄露：如果在延长文件的过程中磁盘被耗尽了，那么程序需要比对内存中的Inode和磁盘中的Inode，确认这段时间之内分配了多少新扇区，将其悉数释放：
-  - Free Map：将Free Map中新扇区的Bit置`false`；
-  - Cache Buffer：Cache Buffer中可能含有这些“不上不下”的扇区，需要将它们无害化。虽然说一般情况下不进行无害化也没有关系，修改Free Map便不会导致磁盘泄露，但是Write-Behind线程可能会将这些扇区写入到磁盘中，导致一定量无谓的IO开销，因此需要将它们的`dirty`都置`false`；
-
+- 避免磁盘空间泄露；
+  
 - 实现系统调用`inumber(int fd)`，根据文件描述符获取Inode Number；
   - Inode Number永久性地标识一个文件**或**目录，在文件存在期间，它的存在是唯一的；
   - 使用Inode所在的扇区号作为其Inode Number实际就足够了；
   - 获取`file`中的`inode.sector`；
 
+##### 事务化Inode写入
+
+需要延长文件时，复制一份Cache Buffer中的Inode作为更改的实际应用对象。只有在磁盘分配全程没有出现错误时才使用这份副本
+
+写入完毕之后记得释放，同时写入时需要持有写者锁
+
+##### 避免磁盘空间泄露
+
+如果在延长文件的过程中磁盘被耗尽了，那么程序需要比对内存中的Inode和磁盘中的Inode，确认这段时间之内分配了多少新扇区，将其悉数释放：
+
+- Free Map：将Free Map中新扇区的Bit置`false`；
+- Cache Buffer：分离了空间分配与磁盘写入的语义，因此无需担心Cache Buffer中出现无意义的`meta`；
+
+如果在执行某个[间接块Resize函数](#间接块Resize函数)时新扇区分配失败了，那么需要参考[间接块Resize函数](#间接块Resize函数)中的逻辑释放Block
+
 ### Synchronization
 
-同步相关的问题：
+线程在延长文件时，其他线程想要读取或写入文件内容：
 
-- 线程在延长文件时，其他线程想要读取或写入文件内容：
+> Concurrent reads are not required.
 
-  > Concurrent reads are not required.
+分情况讨论：
 
-  分情况讨论：
+- 延长线程在读写线程之前执行：Inode的写者锁在延长线程手上，其他所有想要读写文件的线程只能等延长线程执行完毕；
+- 延长线程在读写线程之后执行：
+  - 如果延长线程和读写线程的的读写区域并不覆盖，两者相安无事；
+  - 相反，由于延长线程和读写线程读写文件块之前需要获取对应的读写锁，因此不用担心这方面的同步问题；
 
-  - 延长线程在读写线程之前执行：Inode的写者锁在延长线程手上，其他所有想要读写文件的线程只能等延长线程执行完毕；
-  - 延长线程在读写线程之后执行：
-    - 如果延长线程和读写线程的的读写区域并不覆盖，两者相安无事；
-    - 相反，由于延长线程和读写线程读写文件块之前需要获取对应的读写锁，因此不用担心这方面的同步问题；
+线程在延长文件时，文件的Inode被修改了：
 
-- 线程在延长文件时，文件的Inode被修改了：
+> If two operations are **writing to the same sector** or **extending the same ﬁle**, then they are **not** considered independent and you may serialize those operations to maintain data consistency.
 
-  > If two operations are **writing to the same sector** or **extending the same ﬁle**, then they are **not** considered independent and you may serialize those operations to maintain data consistency.
+所以系统同一时间只能有一个线程对某个文件执行延长操作，防止同一时间有两个线程在修改文件。如果`inode_write`检查发现本次的写入操作需要拓展文件，那么：
 
-  所以系统同一时间只能有一个线程对某个文件执行延长操作，防止同一时间有两个线程在修改文件。如果`inode_write`检查发现本次的写入操作需要拓展文件，那么：
-
-  + 递增Inode的`worker_cnt`：防止在线程延长文件时，Inode被意外Evict回磁盘之后，其他线程将该Inode读取到Cache Buffer中并对其进行拓展，使两个线程同时延长一个文件；
-  + 获取Inode的的写者锁：防止在线程延长文件时，其他线程执行扇区查找算法，将该Inode读取到Cache Buffer中并对其进行拓展，使两个线程同时延长一个文件；
++ 递增Inode的`worker_cnt`：防止在线程延长文件时，Inode被意外Evict回磁盘之后，其他线程将该Inode读取到Cache Buffer中并对其进行拓展，使两个线程同时延长一个文件；
++ 获取Inode的的写者锁：防止在线程延长文件时，其他线程执行扇区查找算法，将该Inode读取到Cache Buffer中并对其进行拓展，使两个线程同时延长一个文件；
 
 
 ### Rationale
