@@ -6,7 +6,7 @@
 #include <list.h>
 #include <round.h>
 #include <string.h>
-#include <synch.h>
+#include "threads/synch.h"
 
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
@@ -155,7 +155,7 @@ void inode_init(void) {
   for (int i = 0; i < BUFFER_BLOCK_COUNT; i++) {
     lock_init(&(meta_buffer[i].meta_lock));
     lock_init(&(meta_buffer[i].block_lock));
-    meta_buffer[i].block = cache_buffer + i;
+    meta_buffer[i].block = cache_buffer + i * BLOCK_SECTOR_SIZE;
     meta_buffer[i].dirty = false;
     meta_buffer[i].worker_cnt = 0;
     meta_buffer[i].sector = INIT_SECTOR;
@@ -190,7 +190,7 @@ bool inode_create(block_sector_t sector, off_t length) {
     /* 在Free Map中分配指定数目的的扇区，开始位置保存为disk_inode->start */
     if (free_map_allocate(sectors, &disk_inode->start)) {
       /* 将inode_disk写入到设备中 */
-      write_to_sector(sector, disk_inode);
+      write_to_sector(sector, (uint8_t *)disk_inode);
 
       if (sectors > 0) {
         static char zeros[BLOCK_SECTOR_SIZE];
@@ -198,7 +198,7 @@ bool inode_create(block_sector_t sector, off_t length) {
 
         /* 将所有的数据扇区写入到文件中 */
         for (i = 0; i < sectors; i++)
-          write_to_sector(disk_inode->start + i, zeros);
+          write_to_sector(disk_inode->start + i, (uint8_t *)zeros);
       }
       success = true;
     }
@@ -570,7 +570,7 @@ done:
  *
  * @pre 持有meta_lock，block_lock，不持有队列锁
  */
-static meta_t *evict_meta_bottom_half(meta_t *meta, off_t sector, bool load) {
+static void evict_meta_bottom_half(meta_t *meta, off_t sector, bool load) {
   ASSERT(!lock_held_by_current_thread(&queue_lock));
   ASSERT(lock_held_by_current_thread(&meta->meta_lock));
   ASSERT(lock_held_by_current_thread(&meta->block_lock));
