@@ -53,12 +53,12 @@ static struct lock queue_lock;
 
 /* In-memory inode. */
 struct inode {
-  struct list_elem elem;  /* Element in inode list. */
-  block_sector_t sector;  /* Sector number of disk location. */
-  int open_cnt;           /* Number of openers. */
-  bool removed;           /* True if deleted, false otherwise. */
-  int deny_write_cnt;     /* 0: writes ok, >0: deny writes. */
-  struct inode_disk data; /* Inode content. */
+  struct list_elem elem; /* Element in inode list. */
+  block_sector_t sector; /* Sector number of disk location. */
+  int open_cnt;          /* Number of openers. */
+  off_t length;          /* File size in bytes. */
+  bool removed;          /* True if deleted, false otherwise. */
+  int deny_write_cnt;    /* 0: writes ok, >0: deny writes. */
 };
 
 /* Cache Buffer各Block的元数据，用于维护SC队列 */
@@ -66,14 +66,51 @@ typedef struct meta {
   struct lock meta_lock;  /* 元数据锁 */
   block_sector_t sector;  /* Block对应扇区的下标 */
   int worker_cnt;         /* 等待或正在使用Block的线程数 */
-  bool dirty;             /* Dirty Bit */
-  struct lock block_lock; /* Block的RW锁 */
+  struct lock block_lock; /* Block的锁 */
+  bool dirty;             /* Dirty Bit，读写前先获取block_lock */
   uint8_t *block;         /* 元数据对应的Block */
   struct list_elem elem;  /* 必然位于SC或者Active中 */
 } meta_t;
 
 /* 64个meta的位置 */
 static meta_t *meta_buffer;
+
+static void read_from_sector(off_t sector, uint8_t *buffer);
+static void write_to_sector(off_t sector, uint8_t *buffer);
+static meta_t *search_sector(off_t sector, bool load);
+
+/**
+ * @brief 线程安全地对META指向的Cache Block执行READ_ACTION，读取其中数据，完成后递减worker_cnt
+ *
+ * @param __meta 待读取的meta
+ * @param read_action 读取操作（不会递增Dirty Bit）
+ */
+#define safe_sector_read(__meta, read_action)                                                                  \
+  do {                                                                                                       \
+    lock_acquire(&__meta->block_lock);                                                                         \
+    { read_action; }                                                                                         \
+    lock_release(&__meta->block_lock);                                                                         \
+    lock_acquire(&__meta->meta_lock);                                                                          \
+    __meta->worker_cnt--;                                                                                      \
+    lock_release(&__meta->meta_lock);                                                                          \
+  } while (0)
+
+/**
+ * @brief 线程安全地对META指向的Cache Block执行WRITE_ACTION，执行数据写入操作，完成后递减worker_cnt
+ *
+ * @param __meta 待写入的meta
+ * @param write_action 写入操作（设置Dirty Bit）
+ */
+#define safe_sector_write(__meta, write_action)                                                                \
+  do {                                                                                                       \
+    lock_acquire(&__meta->block_lock);                                                                         \
+    { write_action; }                                                                                        \
+    __meta->dirty = true;                                                                                      \
+    lock_release(&__meta->block_lock);                                                                         \
+    lock_acquire(&__meta->meta_lock);                                                                          \
+    __meta->worker_cnt--;                                                                                      \
+    lock_release(&__meta->meta_lock);                                                                          \
+  } while (0)
 
 /* TODO 实现需修改，估计需要加一段“从Buffer Cache中获取Inode”的代码
 
@@ -85,8 +122,11 @@ static meta_t *meta_buffer;
    POS. */
 static block_sector_t byte_to_sector(const struct inode *inode, off_t pos) {
   ASSERT(inode != NULL);
-  if (pos < inode->data.length)
-    return inode->data.start + pos / BLOCK_SECTOR_SIZE;
+  block_sector_t start;
+  meta_t *meta = search_sector(inode->sector, true);
+  safe_sector_read(meta, { start = ((struct inode_disk *)meta->block)->start; });
+  if (pos < inode->length)
+    return start + pos / BLOCK_SECTOR_SIZE;
   else
     return -1;
 }
@@ -150,14 +190,15 @@ bool inode_create(block_sector_t sector, off_t length) {
     /* 在Free Map中分配指定数目的的扇区，开始位置保存为disk_inode->start */
     if (free_map_allocate(sectors, &disk_inode->start)) {
       /* 将inode_disk写入到设备中 */
-      block_write(fs_device, sector, disk_inode);
+      write_to_sector(sector, disk_inode);
+
       if (sectors > 0) {
         static char zeros[BLOCK_SECTOR_SIZE];
         size_t i;
 
         /* 将所有的数据扇区写入到文件中 */
         for (i = 0; i < sectors; i++)
-          block_write(fs_device, disk_inode->start + i, zeros);
+          write_to_sector(disk_inode->start + i, zeros);
       }
       success = true;
     }
@@ -193,7 +234,10 @@ struct inode *inode_open(block_sector_t sector) {
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
   inode->removed = false;
-  block_read(fs_device, inode->sector, &inode->data);
+
+  meta_t *meta = search_sector(inode->sector, true);
+  safe_sector_read(meta, { inode->length = ((struct inode_disk *)meta->block)->length; });
+
   return inode;
 }
 
@@ -223,7 +267,10 @@ void inode_close(struct inode *inode) {
     /* Deallocate blocks if removed. */
     if (inode->removed) {
       free_map_release(inode->sector, 1);
-      free_map_release(inode->data.start, bytes_to_sectors(inode->data.length));
+      meta_t *meta = search_sector(inode->sector, true);
+      block_sector_t start;
+      safe_sector_read(meta, { start = ((struct inode_disk *)meta->block)->start; }); 
+      free_map_release(start, bytes_to_sectors(inode->length));
     }
 
     free(inode);
@@ -287,7 +334,7 @@ off_t inode_read_at(struct inode *inode, void *buffer_, off_t size, off_t offset
 
     if (sector_ofs == 0 && chunk_size == BLOCK_SECTOR_SIZE) {
       /* Read full sector directly into caller's buffer. */
-      block_read(fs_device, sector_idx, buffer + bytes_read);
+      read_from_sector(sector_idx, buffer + bytes_read);
     } else {
       /* Read sector into bounce buffer, then partially copy
              into caller's buffer. */
@@ -296,7 +343,7 @@ off_t inode_read_at(struct inode *inode, void *buffer_, off_t size, off_t offset
         if (bounce == NULL)
           break;
       }
-      block_read(fs_device, sector_idx, bounce);
+      read_from_sector(sector_idx, bounce);
       memcpy(buffer + bytes_read, bounce + sector_ofs, chunk_size);
     }
 
@@ -342,7 +389,7 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
 
     if (sector_ofs == 0 && chunk_size == BLOCK_SECTOR_SIZE) {
       /* Write full sector directly to disk. */
-      block_write(fs_device, sector_idx, buffer + bytes_written);
+      write_to_sector(sector_idx, buffer + bytes_written);
     } else {
       /* We need a bounce buffer. */
       if (bounce == NULL) {
@@ -355,11 +402,11 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
              we're writing, then we need to read in the sector
              first.  Otherwise we start with a sector of all zeros. */
       if (sector_ofs > 0 || chunk_size < sector_left)
-        block_read(fs_device, sector_idx, bounce);
+        read_from_sector(sector_idx, bounce);
       else
         memset(bounce, 0, BLOCK_SECTOR_SIZE);
       memcpy(bounce + sector_ofs, buffer + bytes_written, chunk_size);
-      block_write(fs_device, sector_idx, bounce);
+      write_to_sector(sector_idx, bounce);
     }
 
     /* Advance. */
@@ -390,7 +437,7 @@ void inode_allow_write(struct inode *inode) {
 }
 
 /* Returns the length, in bytes, of INODE's data. */
-off_t inode_length(const struct inode *inode) { return inode->data.length; }
+off_t inode_length(const struct inode *inode) { return inode->length; }
 
 /**
  * @brief 将META从sc队列移动到at队列
@@ -574,7 +621,30 @@ static meta_t *search_sector(off_t sector, bool load) {
   ASSERT(result->worker_cnt == 1);
 
 done:
+  ASSERT(result != NULL);
   ASSERT(result->sector == sector);
   ASSERT(result->worker_cnt > 0);
   return result;
+}
+
+/**
+ * @brief 将BUFFER中的内容覆写到SECTOR扇区中
+ *
+ * @param sector 目标扇区
+ * @param buffer 待覆写内容，大小至少为512 Byte
+ */
+static void write_to_sector(off_t sector, uint8_t *buffer) {
+  meta_t *meta = search_sector(sector, false);
+  safe_sector_write(meta, { memcpy(meta->block, buffer, BLOCK_SECTOR_SIZE); });
+}
+
+/**
+ * @brief 将SECTOR扇区读取到BUFFER中
+ *
+ * @param sector 目标扇区
+ * @param buffer 缓存，大小至少为512 Byte
+ */
+static void read_from_sector(off_t sector, uint8_t *buffer) {
+  meta_t *meta = search_sector(sector, true);
+  safe_sector_read(meta, { memcpy(buffer, meta->block, BLOCK_SECTOR_SIZE); });
 }
