@@ -4,9 +4,9 @@
 #include "threads/malloc.h"
 #include <debug.h>
 #include <list.h>
-#include <synch.h>
 #include <round.h>
 #include <string.h>
+#include <synch.h>
 
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
@@ -63,13 +63,13 @@ struct inode {
 
 /* Cache Buffer各Block的元数据，用于维护SC队列 */
 typedef struct meta {
-  struct lock meta_lock;     /* 元数据锁 */
-  block_sector_t sector;     /* Block对应扇区的下标 */
-  int worker_cnt;            /* 等待或正在使用Block的线程数 */
-  bool dirty;                /* Dirty Bit */
-  struct rw_lock block_lock; /* Block的RW锁 */
-  uint8_t *block;            /* 元数据对应的Block */
-  struct list_elem elem;     /* 必然位于SC或者Active中 */
+  struct lock meta_lock;  /* 元数据锁 */
+  block_sector_t sector;  /* Block对应扇区的下标 */
+  int worker_cnt;         /* 等待或正在使用Block的线程数 */
+  bool dirty;             /* Dirty Bit */
+  struct lock block_lock; /* Block的RW锁 */
+  uint8_t *block;         /* 元数据对应的Block */
+  struct list_elem elem;  /* 必然位于SC或者Active中 */
 } meta_t;
 
 /* 64个meta的位置 */
@@ -102,7 +102,7 @@ void inode_init(void) {
   cache_buffer = malloc(BUFFER_BLOCK_COUNT * BLOCK_SECTOR_SIZE);
   if (cache_buffer == NULL)
     PANIC("inode_init malloc fail");
-  
+
   lock_init(&queue_lock);
 
   /* initialize 64 struct meta */
@@ -114,7 +114,7 @@ void inode_init(void) {
   list_init(&active_blocks);
   for (int i = 0; i < BUFFER_BLOCK_COUNT; i++) {
     lock_init(&(meta_buffer[i].meta_lock));
-    rw_lock_init(&(meta_buffer[i].block_lock));
+    lock_init(&(meta_buffer[i].block_lock));
     meta_buffer[i].block = cache_buffer + i;
     meta_buffer[i].dirty = false;
     meta_buffer[i].worker_cnt = 0;
@@ -394,15 +394,15 @@ off_t inode_length(const struct inode *inode) { return inode->data.length; }
 
 /**
  * @brief 将META从sc队列移动到at队列
- * 
- * @param meta 
+ *
+ * @param meta
  * @pre 当前线程持有队列锁以及meta的锁，同时worker_cnt不为0
  */
-static void move_meta_to_at(meta_t* meta){
+static void move_meta_to_at(meta_t *meta) {
   ASSERT(lock_held_by_current_thread(&queue_lock));
   ASSERT(lock_held_by_current_thread(&(meta->meta_lock)));
   ASSERT(meta->worker_cnt != 0);
-  
+
   // 移除AT末尾元素，将其插入到SC头部，再将meta插入到AT头部
   list_remove(&meta->elem);
   list_push_front(&active_blocks, &meta->elem);
@@ -415,24 +415,23 @@ static void move_meta_to_at(meta_t* meta){
 
 /**
  * @brief 正向遍历队列，查找是否已经将目标扇区加载到Cache Buffer中
- * 
- * @param sector 
- * @return meta_t* 
+ *
+ * @param sector
+ * @return meta_t*
  *  已加载：将`meta`移动到合适位置并返回指针；
  *  未加载：返回`NULL`
  */
-static meta_t* find_sector(off_t sector){
+static meta_t *find_sector(off_t sector) {
   ASSERT(lock_held_by_current_thread(&queue_lock));
 
-  struct lock* queue_lock = &queue_lock;
-  struct list* active_queue = &active_blocks;
+  struct list *active_queue = &active_blocks;
   meta_t *pos = NULL;
   meta_t *result = NULL;
 
   // 在active list中寻找sector
-  list_for_each_entry(pos, active_queue, elem){
+  list_for_each_entry(pos, active_queue, elem) {
     lock_acquire(&pos->meta_lock);
-    if(pos->sector == sector){
+    if (pos->sector == sector) {
       result = pos;
       pos->worker_cnt++;
       lock_release(&pos->meta_lock);
@@ -441,11 +440,12 @@ static meta_t* find_sector(off_t sector){
     lock_release(&pos->meta_lock);
   }
 
-  struct list* sc_list = &sc_blocks;
+  struct list *sc_queue = &sc_blocks;
+  pos = NULL;
   // 在sc list中寻找sector，执行队列移动
-  list_for_each_entry(pos, sc_list, elem){
+  list_for_each_entry(pos, sc_queue, elem) {
     lock_acquire(&pos->meta_lock);
-    if(pos->sector == sector){
+    if (pos->sector == sector) {
       result = pos;
       pos->worker_cnt++;
       move_meta_to_at(pos);
@@ -455,28 +455,126 @@ static meta_t* find_sector(off_t sector){
     lock_release(&pos->meta_lock);
   }
 
-  done:
-    return result;
+done:
+  return result;
+}
+/**
+ * @brief 反向遍历队列，寻找可被移出Cache Buffer的`meta`，将其移动到队列中合适的位置。
+ *        meta.sector和meta.dirty会维持不变
+ *
+ * @note
+ * 执行完毕后，当前线程同时持有返回值的meta_lock以及block_lock。返回Caller之后，应当释放队列锁并调用evict_meta_bottom_half
+ *
+ * @param sector
+ * @return meta_t*
+ */
+static meta_t *evict_meta_top_half(off_t sector) {
+  ASSERT(lock_held_by_current_thread(&queue_lock));
+
+  struct list *active_queue = &active_blocks;
+  struct list *sc_queue = &sc_blocks;
+  meta_t *pos = NULL;
+  meta_t *result = NULL;
+  struct lock *meta_lock = NULL;
+  while (result == NULL) {
+    // 在sc list中寻找可移出的meta，执行队列移动
+    list_reverse_for_each_entry(pos, sc_queue, elem) {
+      meta_lock = &pos->meta_lock;
+      lock_acquire(meta_lock);
+      if (pos->worker_cnt == 0) {
+        result = pos;
+        pos->worker_cnt++;
+        move_meta_to_at(pos);
+        goto done;
+      }
+      lock_release(meta_lock);
+    }
+
+    // 在at list中寻找可移出的meta
+    list_reverse_for_each_entry(pos, active_queue, elem) {
+      meta_lock = &pos->meta_lock;
+      lock_acquire(meta_lock);
+      if (pos->worker_cnt == 0) {
+        result = pos;
+        pos->worker_cnt++;
+        goto done;
+      }
+      lock_release(meta_lock);
+    }
+  }
+
+done:
+  // 防止其他线程读取到垃圾值，需要先将与之对应的Cache Buffer锁住
+  lock_acquire(&result->block_lock);
+  // 之后还需要检查Dirty Bit并设置sector，因此不能释放meta_lock
+  // lock_release(meta_lock);
+  return result;
+}
+
+/**
+ * @brief 执行磁盘IO：
+ * 1. 如果meta->dirty == true，将Cache Block中的数据写入到扇区meta->sector；
+ * 2. meta->dirty = false，meta->sector = sector；
+ * 3. 按照读取旗标的要求，将新meta->sector中的内容从磁盘读取到Cache Buffer；
+ *
+ * @param meta 待处理的meta，应位于绿色队列，其中的dirty和sector维持原值
+ * @param sector 需要替换到meta中的扇区
+ * @param load 是否需要将sector位于磁盘中的数据加载到Cache Buffer中
+ *
+ * @pre 持有meta_lock，block_lock，不持有队列锁
+ */
+static meta_t *evict_meta_bottom_half(meta_t *meta, off_t sector, bool load) {
+  ASSERT(!lock_held_by_current_thread(&queue_lock));
+  ASSERT(lock_held_by_current_thread(&meta->meta_lock));
+  ASSERT(lock_held_by_current_thread(&meta->block_lock));
+
+  if (meta->dirty) {
+    block_write(fs_device, meta->sector, meta->block);
+    meta->dirty = false;
+  }
+
+  meta->sector = sector;
+
+  if (load) {
+    block_read(fs_device, meta->sector, meta->block);
+  }
+  lock_release(&meta->block_lock);
+  lock_release(&meta->meta_lock);
 }
 
 /**
  * @brief 确保指定扇区被加载到Cache Buffer中，返回与该扇区对应的`meta`指针
- * 
+ *
  * @param sector 待查找的扇区；
  * @param load 读取旗标，是否要将该扇区的内容读取到`meta`中；
  * @return meta_t* 指向的`meta`为指定扇区中的内容
- */
-static meta_t* search_sector(off_t sector, bool load){
+ *
+ * @post result->worker_cnt > 0
+ * */
+static meta_t *search_sector(off_t sector, bool load) {
   lock_acquire(&queue_lock);
 
   meta_t *result = NULL;
   // 正向遍历两个队列
   result = find_sector(sector);
-  if(result != NULL){
-
+  if (result != NULL) {
+    // 不用管读取旗标
+    lock_release(&queue_lock);
+    goto done;
   }
 
+  // 反向遍历队列
+  result = evict_meta_top_half(sector);
+  ASSERT(result != NULL);
 
-  
   lock_release(&queue_lock);
+
+  // 释放队列锁之后再执行磁盘IO
+  evict_meta_bottom_half(result, sector, load);
+  ASSERT(result->worker_cnt == 1);
+
+done:
+  ASSERT(result->sector == sector);
+  ASSERT(result->worker_cnt > 0);
+  return result;
 }

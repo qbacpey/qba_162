@@ -118,6 +118,10 @@ struct list {
   for (pos = list_entry(list_begin(list), typeof(*pos), member);    \
        &(pos->member) != list_end(list); pos = list_entry(pos->member.next, typeof(*pos), member))
 
+#define list_reverse_for_each_entry(pos, list, member)                                                     \
+  for (pos = list_entry(list_rbegin(list), typeof(*pos), member);    \
+       &(pos->member) != list_rend(list); pos = list_entry(pos->member.prev, typeof(*pos), member))
+
 /** 
 * list_clean_each  -       iterate over list of given type 
 * 注意，word_count里边的elem是一个结构体，而不是一个指向list_elem的指针
