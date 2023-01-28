@@ -1,14 +1,30 @@
 #include "filesys/inode.h"
-#include <list.h>
-#include <debug.h>
-#include <round.h>
-#include <string.h>
 #include "filesys/filesys.h"
 #include "filesys/free-map.h"
 #include "threads/malloc.h"
+#include <debug.h>
+#include <list.h>
+#include <synch.h>
+#include <round.h>
+#include <string.h>
 
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
+
+/* Cache Buffer Block Count */
+#define BUFFER_BLOCK_COUNT 64
+
+/* 一个扇区中最多可容纳的指针数目 */
+#define POINTER_IN_SECTOR 128
+
+/* Active Block Queue Length */
+#define AT_LENGTH 32
+
+/* Second Chance Queue Length */
+#define SC_LENGTH 32
+
+/* 1.6 TB */
+#define INIT_SECTOR 0xCCCCCCCC
 
 /* On-disk inode.
    Must be exactly BLOCK_SECTOR_SIZE bytes long. */
@@ -23,6 +39,18 @@ struct inode_disk {
    bytes long. */
 static inline size_t bytes_to_sectors(off_t size) { return DIV_ROUND_UP(size, BLOCK_SECTOR_SIZE); }
 
+/* 绿色队列，用于保存活跃Block，最大长度为32 */
+static struct list active_blocks;
+
+/* 黄色队列，用于保存Evict候选Block，最大长度为32 */
+static struct list sc_blocks;
+
+/* Cache Buffer 数组，指向一个长度为 64 * 512 Byte 的数组 */
+uint8_t *cache_buffer;
+
+/* 队列共用锁 */
+static struct lock queue_lock;
+
 /* In-memory inode. */
 struct inode {
   struct list_elem elem;  /* Element in inode list. */
@@ -33,7 +61,21 @@ struct inode {
   struct inode_disk data; /* Inode content. */
 };
 
-/* TODO 实现需修改，估计需要加一段“从Buffer Cache中获取Inode”的代码 
+/* Cache Buffer各Block的元数据，用于维护SC队列 */
+typedef struct meta {
+  struct lock meta_lock;     /* 元数据锁 */
+  block_sector_t sector;     /* Block对应扇区的下标 */
+  int worker_cnt;            /* 等待或正在使用Block的线程数 */
+  bool dirty;                /* Dirty Bit */
+  struct rw_lock block_lock; /* Block的RW锁 */
+  uint8_t *block;            /* 元数据对应的Block */
+  struct list_elem elem;     /* 必然位于SC或者Active中 */
+} meta_t;
+
+/* 64个meta的位置 */
+static meta_t *meta_buffer;
+
+/* TODO 实现需修改，估计需要加一段“从Buffer Cache中获取Inode”的代码
 
   Returns the block device sector that contains byte offset POS
    within INODE.
@@ -41,7 +83,7 @@ struct inode {
 
    Returns -1 if INODE does not contain data for a byte at offset
    POS. */
-static block_sector_t byte_to_sector(const struct inode* inode, off_t pos) {
+static block_sector_t byte_to_sector(const struct inode *inode, off_t pos) {
   ASSERT(inode != NULL);
   if (pos < inode->data.length)
     return inode->data.start + pos / BLOCK_SECTOR_SIZE;
@@ -54,7 +96,35 @@ static block_sector_t byte_to_sector(const struct inode* inode, off_t pos) {
 static struct list open_inodes;
 
 /* Initializes the inode module. */
-void inode_init(void) { list_init(&open_inodes); }
+void inode_init(void) {
+  list_init(&open_inodes);
+  /* Cache Buffer */
+  cache_buffer = malloc(BUFFER_BLOCK_COUNT * BLOCK_SECTOR_SIZE);
+  if (cache_buffer == NULL)
+    PANIC("inode_init malloc fail");
+  
+  lock_init(&queue_lock);
+
+  /* initialize 64 struct meta */
+  meta_buffer = malloc(BUFFER_BLOCK_COUNT * sizeof(meta_t));
+  if (cache_buffer == NULL)
+    PANIC("inode_init malloc fail");
+  /* add to at queue */
+  list_init(&sc_blocks);
+  list_init(&active_blocks);
+  for (int i = 0; i < BUFFER_BLOCK_COUNT; i++) {
+    lock_init(&(meta_buffer[i].meta_lock));
+    rw_lock_init(&(meta_buffer[i].block_lock));
+    meta_buffer[i].block = cache_buffer + i;
+    meta_buffer[i].dirty = false;
+    meta_buffer[i].worker_cnt = 0;
+    meta_buffer[i].sector = INIT_SECTOR;
+    if (i < AT_LENGTH)
+      list_push_back(&active_blocks, &(meta_buffer[i].elem));
+    else
+      list_push_back(&sc_blocks, &(meta_buffer[i].elem));
+  }
+}
 
 /* Initializes an inode with LENGTH bytes of data and
    writes the new inode to sector SECTOR on the file system
@@ -62,7 +132,7 @@ void inode_init(void) { list_init(&open_inodes); }
    Returns true if successful.
    Returns false if memory or disk allocation fails. */
 bool inode_create(block_sector_t sector, off_t length) {
-  struct inode_disk* disk_inode = NULL;
+  struct inode_disk *disk_inode = NULL;
   bool success = false;
 
   ASSERT(length >= 0);
@@ -77,7 +147,7 @@ bool inode_create(block_sector_t sector, off_t length) {
     size_t sectors = bytes_to_sectors(length);
     disk_inode->length = length;
     disk_inode->magic = INODE_MAGIC;
-    /* 在Free Map中分配指定数目的的扇区，开始位置为disk_inode->start */
+    /* 在Free Map中分配指定数目的的扇区，开始位置保存为disk_inode->start */
     if (free_map_allocate(sectors, &disk_inode->start)) {
       /* 将inode_disk写入到设备中 */
       block_write(fs_device, sector, disk_inode);
@@ -99,9 +169,9 @@ bool inode_create(block_sector_t sector, off_t length) {
 /* Reads an inode from SECTOR
    and returns a `struct inode' that contains it.
    Returns a null pointer if memory allocation fails. */
-struct inode* inode_open(block_sector_t sector) {
-  struct list_elem* e;
-  struct inode* inode;
+struct inode *inode_open(block_sector_t sector) {
+  struct list_elem *e;
+  struct inode *inode;
 
   /* Check whether this inode is already open. */
   for (e = list_begin(&open_inodes); e != list_end(&open_inodes); e = list_next(e)) {
@@ -128,19 +198,19 @@ struct inode* inode_open(block_sector_t sector) {
 }
 
 /* Reopens and returns INODE. */
-struct inode* inode_reopen(struct inode* inode) {
+struct inode *inode_reopen(struct inode *inode) {
   if (inode != NULL)
     inode->open_cnt++;
   return inode;
 }
 
 /* Returns INODE's inode number. */
-block_sector_t inode_get_inumber(const struct inode* inode) { return inode->sector; }
+block_sector_t inode_get_inumber(const struct inode *inode) { return inode->sector; }
 
 /* Closes INODE and writes it to disk.
    If this was the last reference to INODE, frees its memory.
    If INODE was also a removed inode, frees its blocks. */
-void inode_close(struct inode* inode) {
+void inode_close(struct inode *inode) {
   /* Ignore null pointer. */
   if (inode == NULL)
     return;
@@ -162,27 +232,27 @@ void inode_close(struct inode* inode) {
 
 /* Marks INODE to be deleted when it is closed by the last caller who
    has it open. */
-void inode_remove(struct inode* inode) {
+void inode_remove(struct inode *inode) {
   ASSERT(inode != NULL);
   inode->removed = true;
 }
 
 /* Reads SIZE bytes from INODE into BUFFER, starting at position OFFSET.
    Returns the number of bytes actually read, which may be less
-   than SIZE if an error occurs or end of file is reached. 
-   
-   简而言之就是将文件INODE中从OFFSET开始，长度为SIZE的数据读取到BUFFER中 
+   than SIZE if an error occurs or end of file is reached.
+
+   简而言之就是将文件INODE中从OFFSET开始，长度为SIZE的数据读取到BUFFER中
 
    实现的关键在于OFFSET不仅可能是文件的开始，也可能是中间某个扇区的起始位置
    还有可能是位于某个扇区的中间，这时候就要注意从OFFSET开始将数据读取
-   
+
    文件的结束位置和扇区边界之间也需要注意，文件可能在扇区的边界结束，也有可能
    在某个扇区的中间位置结束，这时候就需要注意不要将文件结尾与扇区的边界之间的
    垃圾值读取到Buffer中（Buffer的大小可能只有SIZE，读取过多数据可能会溢出）
 
    此外，还有可能OFFSET+SIZE结束在某个扇区的中间，这时候也要注意不要将垃圾值
    读取到Buffer中
-   
+
    综上，此函数整体读取过程可被归结如下：
    1. 计算chunk_size：本轮循环中需要读取到Buffer中、位于当前聚焦扇区中的数据量：
     1. 如果chunk_size恰好为BLOCK_SECTOR_SIZE，那么可以直接将聚焦扇区的所有
@@ -190,14 +260,14 @@ void inode_remove(struct inode* inode) {
     2. 如果chunk_size不为BLOCK_SECTOR_SIZE，那么聚焦扇区可能有如下三种可能性：
        1. OFFSET开始于聚焦扇区的中间；
        2. 聚焦扇区包含文件的末尾；
-       3. OFFSET+SIZE的结束位置位于聚焦扇区的中间； 
+       3. OFFSET+SIZE的结束位置位于聚焦扇区的中间；
        总而言之，只需要将聚焦扇区的一部分读取到Buffer中
    2. 如果chunk_size恰好为BLOCK_SECTOR_SIZE，那么可以直接调用block_read将
       整个扇区的数据都读取到Buffer中。相对的，需要将bounce中的内容读取到Buffer中；*/
-off_t inode_read_at(struct inode* inode, void* buffer_, off_t size, off_t offset) {
-  uint8_t* buffer = buffer_;
+off_t inode_read_at(struct inode *inode, void *buffer_, off_t size, off_t offset) {
+  uint8_t *buffer = buffer_;
   off_t bytes_read = 0;
-  uint8_t* bounce = NULL;
+  uint8_t *bounce = NULL;
 
   while (size > 0) {
     /* Disk sector to read, starting byte offset within sector. */
@@ -247,10 +317,10 @@ off_t inode_read_at(struct inode* inode, void* buffer_, off_t size, off_t offset
    现在的实现如果在文件末尾继续写入数据的话，不会对文件进行拓展
    (Normally a write at end of file would extend the inode, but
    growth is not yet implemented.) */
-off_t inode_write_at(struct inode* inode, const void* buffer_, off_t size, off_t offset) {
-  const uint8_t* buffer = buffer_;
+off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t offset) {
+  const uint8_t *buffer = buffer_;
   off_t bytes_written = 0;
-  uint8_t* bounce = NULL;
+  uint8_t *bounce = NULL;
 
   if (inode->deny_write_cnt)
     return 0;
@@ -305,7 +375,7 @@ off_t inode_write_at(struct inode* inode, const void* buffer_, off_t size, off_t
 /* Disables writes to INODE.
    May be called at most once per inode opener.
    每个开启此文件的进程只可调用一次此函数 */
-void inode_deny_write(struct inode* inode) {
+void inode_deny_write(struct inode *inode) {
   inode->deny_write_cnt++;
   ASSERT(inode->deny_write_cnt <= inode->open_cnt);
 }
@@ -313,11 +383,42 @@ void inode_deny_write(struct inode* inode) {
 /* Re-enables writes to INODE.
    Must be called once by each inode opener who has called
    inode_deny_write() on the inode, before closing the inode. */
-void inode_allow_write(struct inode* inode) {
+void inode_allow_write(struct inode *inode) {
   ASSERT(inode->deny_write_cnt > 0);
   ASSERT(inode->deny_write_cnt <= inode->open_cnt);
   inode->deny_write_cnt--;
 }
 
 /* Returns the length, in bytes, of INODE's data. */
-off_t inode_length(const struct inode* inode) { return inode->data.length; }
+off_t inode_length(const struct inode *inode) { return inode->data.length; }
+
+/**
+ * @brief 正向遍历队列，查找是否已经将目标扇区加载到Cache Buffer中
+ * 
+ * @param sector 
+ * @return meta_t* 
+ *  已加载：将`meta`移动到合适位置并返回指针；
+ *  未加载：返回`NULL`
+ */
+static meta_t* find_sector(off_t sector){
+  struct list* active_queue = &active_blocks;
+  struct lock* queue_lock = &queue_lock;
+  meta_t *pos = NULL;
+  list_for_each_entry(pos, active_queue, elem){
+    if(pos->sector == sector){
+      // 在active list中找到对应
+    }
+  }
+}
+
+/**
+ * @brief 确保指定扇区被加载到Cache Buffer中，返回与该扇区对应的`meta`指针
+ * 
+ * @param sector 待查找的扇区；
+ * @param load 读取旗标，是否要将该扇区的内容读取到`meta`中；
+ * @return meta_t* 指向的`meta`为指定扇区中的内容
+ */
+static meta_t* search_sector(off_t sector, bool load){
+  lock_acquire(&queue_lock);
+  lock_release(&queue_lock);
+}

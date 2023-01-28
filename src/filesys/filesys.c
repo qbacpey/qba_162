@@ -81,7 +81,8 @@ struct block* fs_device;
 static void do_format(void);
 
 /* Initializes the file system module.
-   If FORMAT is true, reformats the file system. */
+   If FORMAT is true, reformats the file system. 
+   可以等价地将格式化理解为初始化 */
 void filesys_init(bool format) {
   fs_device = block_get_role(BLOCK_FILESYS);
   if (fs_device == NULL)

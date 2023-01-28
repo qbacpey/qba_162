@@ -22,8 +22,10 @@ void free_map_init(void) {
    Returns true if successful, false if not enough consecutive
    sectors were available or if the free_map file could not be
    written. */
-bool free_map_allocate(size_t cnt, block_sector_t* sectorp) {
+bool free_map_allocate(size_t cnt, block_sector_t *sectorp) {
   block_sector_t sector = bitmap_scan_and_flip(free_map, 0, cnt, false);
+  /* 就算 free_map_file == NULL（格式化文件系统，Free Map文件不存在），只要可以设置bitmap
+     那么此函数依旧可以成功执行。只有已存在 free_map_file 才尝试写入文件 */
   if (sector != BITMAP_ERROR && free_map_file != NULL && !bitmap_write(free_map, free_map_file)) {
     bitmap_set_multiple(free_map, sector, cnt, false);
     sector = BITMAP_ERROR;
@@ -53,9 +55,11 @@ void free_map_open(void) {
 void free_map_close(void) { file_close(free_map_file); }
 
 /* Creates a new free map file on disk and writes the free map to
-   it. */
+   it.
+   Free Map文件的Inode位于 FREE_MAP_SECTOR 扇区，
+   大小为 bitmap_file_size(free_map) */
 void free_map_create(void) {
-  /* Create inode. */
+  /* Create inode. 就算 free_map_file 文件不存在，依旧可以成功创建 */
   if (!inode_create(FREE_MAP_SECTOR, bitmap_file_size(free_map)))
     PANIC("free map creation failed");
 
