@@ -160,7 +160,6 @@ struct process {
 
   struct list files_tab;  /* 元素是文件描述符表元素，也就是struct file_desc */
   struct lock files_lock; /* 文件描述符表的锁 */
-  struct semaphore* filesys_sema; /* 全局文件系统信号量指针 */
   uint32_t files_next_desc;       /* 下一文件描述符 */
 
   struct list threads; /* 元素是TCB */

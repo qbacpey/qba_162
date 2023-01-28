@@ -20,9 +20,7 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
-#include "userprog/filesys_lock.h"
 
-struct semaphore* filesys_sema = NULL; /* 定义全局临时文件系统锁 */
 // static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
@@ -46,11 +44,6 @@ struct init_pcb {
    简而言之，在这里执行主线程（进程）的初始化操作
    */
 void userprog_init(void) {
-
-  if (filesys_sema == NULL) {
-    malloc_type(filesys_sema);
-    sema_init(filesys_sema, 1);
-  }
 
   struct thread* t = thread_current();
   bool success;
@@ -222,7 +215,6 @@ static void start_process(void* init_pcb_) {
   list_init(&(t->pcb->files_tab));
   lock_init(&t->pcb->files_lock);
   t->pcb->files_next_desc = 3;
-  t->pcb->filesys_sema = NULL;
 
   // 初始化子进程表
   t->pcb->self = self;
@@ -243,10 +235,8 @@ static void start_process(void* init_pcb_) {
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  sema_down(filesys_sema);
   /* 需要确保绝无可能出现page fault */
   success = load(file_name, &if_.eip, &if_.esp);
-  sema_up(filesys_sema);
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
   if (!success) {
@@ -535,13 +525,7 @@ void process_exit(int exit_code) {
   free_parent_self(pcb_to_free->self, exit_code);
   sema_up(editing);
 
-  if (pcb_to_free->filesys_sema != NULL) {
-    sema_up(pcb_to_free->filesys_sema); /* 文件系统执行操作时发生page fault */
-  }
-
-  sema_down(filesys_sema);
   file_close(pcb_to_free->exec);
-  sema_up(filesys_sema);
 
   /* 释放文件描述符表，必须使用 NULL 进行初始化 */
   struct file_desc* file_pos = NULL;

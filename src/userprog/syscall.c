@@ -10,7 +10,6 @@
 #include "devices/input.h"
 #include "devices/shutdown.h"
 #include "lib/float.h"
-#include "userprog/filesys_lock.h"
 
 static void syscall_handler(struct intr_frame*);
 
@@ -237,11 +236,11 @@ static int syscall_wait(uint32_t* args, struct process* pcb) {
 static bool syscall_create(uint32_t* args, struct process* pcb) {
   bool result = false;
 
-  sema_down(filesys_sema);
-  pcb->filesys_sema = filesys_sema;
+  
+  
   result = filesys_create((char*)args[1], args[2]);
-  sema_up(filesys_sema);
-  pcb->filesys_sema = NULL;
+  
+  
 
   return result;
 }
@@ -249,11 +248,11 @@ static bool syscall_create(uint32_t* args, struct process* pcb) {
 static bool syscall_remove(uint32_t* args, struct process* pcb) {
   bool result = false;
 
-  sema_down(filesys_sema);
-  pcb->filesys_sema = filesys_sema;
+  
+  
   result = filesys_remove((char*)args[1]);
-  sema_up(filesys_sema);
-  pcb->filesys_sema = NULL;
+  
+  
 
   return result;
 }
@@ -265,10 +264,10 @@ static int syscall_open(uint32_t* args, struct process* pcb) {
 
   // printf("%s: open file%s\n", pcb->process_name, (char*)args[1]);
 
-  pcb->filesys_sema = filesys_sema;
+  
   new_file = filesys_open((char*)args[1]);
-  sema_up(filesys_sema);
-  pcb->filesys_sema = NULL;
+  
+  
 
   if (new_file != NULL) {
     ASSERT(pcb->files_next_desc >= 3);
@@ -299,11 +298,11 @@ static int syscall_close(uint32_t* args, struct process* pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      sema_down(filesys_sema);
-      pcb->filesys_sema = filesys_sema;
+      
+      
       file_close(pos->file);
-      sema_up(filesys_sema);
-      pcb->filesys_sema = NULL;
+      
+      
       result = 0;
       list_remove(&(pos->elem));
       free(pos);
@@ -400,11 +399,11 @@ static int syscall_read(uint32_t* args, struct process* pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      sema_down(filesys_sema);
-      pcb->filesys_sema = filesys_sema;
+      
+      
       off = file_read(pos->file, (void*)args[2], args[3]);
-      sema_up(filesys_sema);
-      pcb->filesys_sema = NULL;
+      
+      
       break;
     }
   }
@@ -429,11 +428,11 @@ static int syscall_write(uint32_t* args, struct process* pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      sema_down(filesys_sema);
-      pcb->filesys_sema = filesys_sema;
+      
+      
       off = file_write(pos->file, (void*)args[2], args[3]);
-      sema_up(filesys_sema);
-      pcb->filesys_sema = NULL;
+      
+      
       break;
     }
   }

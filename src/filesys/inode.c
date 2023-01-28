@@ -436,6 +436,17 @@ void inode_allow_write(struct inode *inode) {
   inode->deny_write_cnt--;
 }
 
+
+/**
+ * @brief 将队列中所有的Dirty Block写入磁盘
+ * 
+ * @note 只能在文件系统被关闭时调用
+ * 
+ */
+void flush_buffer_cache(){
+  
+}
+
 /* Returns the length, in bytes, of INODE's data. */
 off_t inode_length(const struct inode *inode) { return inode->length; }
 
