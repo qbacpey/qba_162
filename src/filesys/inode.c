@@ -393,6 +393,27 @@ void inode_allow_write(struct inode *inode) {
 off_t inode_length(const struct inode *inode) { return inode->data.length; }
 
 /**
+ * @brief 将META从sc队列移动到at队列
+ * 
+ * @param meta 
+ * @pre 当前线程持有队列锁以及meta的锁，同时worker_cnt不为0
+ */
+static void move_meta_to_at(meta_t* meta){
+  ASSERT(lock_held_by_current_thread(&queue_lock));
+  ASSERT(lock_held_by_current_thread(&(meta->meta_lock)));
+  ASSERT(meta->worker_cnt != 0);
+  
+  // 移除AT末尾元素，将其插入到SC头部，再将meta插入到AT头部
+  list_remove(&meta->elem);
+  list_push_front(&active_blocks, &meta->elem);
+  struct list_elem *old_st_back = list_pop_back(&active_blocks);
+  list_push_front(&sc_blocks, old_st_back);
+
+  ASSERT(list_size(&sc_blocks) == SC_LENGTH);
+  ASSERT(list_size(&active_blocks) == AT_LENGTH);
+}
+
+/**
  * @brief 正向遍历队列，查找是否已经将目标扇区加载到Cache Buffer中
  * 
  * @param sector 
@@ -401,14 +422,41 @@ off_t inode_length(const struct inode *inode) { return inode->data.length; }
  *  未加载：返回`NULL`
  */
 static meta_t* find_sector(off_t sector){
-  struct list* active_queue = &active_blocks;
+  ASSERT(lock_held_by_current_thread(&queue_lock));
+
   struct lock* queue_lock = &queue_lock;
+  struct list* active_queue = &active_blocks;
   meta_t *pos = NULL;
+  meta_t *result = NULL;
+
+  // 在active list中寻找sector
   list_for_each_entry(pos, active_queue, elem){
+    lock_acquire(&pos->meta_lock);
     if(pos->sector == sector){
-      // 在active list中找到对应
+      result = pos;
+      pos->worker_cnt++;
+      lock_release(&pos->meta_lock);
+      goto done;
     }
+    lock_release(&pos->meta_lock);
   }
+
+  struct list* sc_list = &sc_blocks;
+  // 在sc list中寻找sector，执行队列移动
+  list_for_each_entry(pos, sc_list, elem){
+    lock_acquire(&pos->meta_lock);
+    if(pos->sector == sector){
+      result = pos;
+      pos->worker_cnt++;
+      move_meta_to_at(pos);
+      lock_release(&pos->meta_lock);
+      goto done;
+    }
+    lock_release(&pos->meta_lock);
+  }
+
+  done:
+    return result;
 }
 
 /**
@@ -420,5 +468,15 @@ static meta_t* find_sector(off_t sector){
  */
 static meta_t* search_sector(off_t sector, bool load){
   lock_acquire(&queue_lock);
+
+  meta_t *result = NULL;
+  // 正向遍历两个队列
+  result = find_sector(sector);
+  if(result != NULL){
+
+  }
+
+
+  
   lock_release(&queue_lock);
 }
