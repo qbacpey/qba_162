@@ -2,11 +2,11 @@
 #include "filesys/filesys.h"
 #include "filesys/free-map.h"
 #include "threads/malloc.h"
+#include "threads/synch.h"
 #include <debug.h>
 #include <list.h>
 #include <round.h>
 #include <string.h>
-#include "threads/synch.h"
 
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
@@ -26,14 +26,33 @@
 /* 1.6 TB */
 #define INIT_SECTOR 0xCCCCCCCC
 
+/* Inode中各种块指针的数目 */
+#define INODE_DIRECT_COUNT 64
+#define INODE_INDIRECT_COUNT 48
+#define INODE_DB_INDIRECT_COUNT 1
+/* 间接块可容纳的指针数量 */
+#define INDIRECT_BLOCK_PTR_COUNT 128
+
 /* On-disk inode.
    Must be exactly BLOCK_SECTOR_SIZE bytes long. */
 struct inode_disk {
-  block_sector_t start; /* First data sector. */
-  off_t length;         /* File size in bytes. */
-  unsigned magic;       /* Magic number. */
-  uint32_t unused[125]; /* Not used. */
+  off_t length;                                 /* File size in bytes. */
+  unsigned magic;                               /* Magic number. */
+  block_sector_t dr_arr[INODE_DIRECT_COUNT];    /* 直接块的下标 */
+  block_sector_t idr_arr[INODE_INDIRECT_COUNT]; /* 间接块的下标 */
+  block_sector_t dbi_arr;                       /* 二级间接块的下标 */
+  uint32_t unused[126 - INODE_DIRECT_COUNT - INODE_INDIRECT_COUNT - INODE_DB_INDIRECT_COUNT]; /* Not used. */
 };
+
+/* 二级间接块 */
+typedef struct dbi_blk {
+  block_sector_t arr[INDIRECT_BLOCK_PTR_COUNT];
+} dbi_blk_t;
+
+/* 间接块 */
+typedef struct idr_blk {
+  block_sector_t arr[INDIRECT_BLOCK_PTR_COUNT];
+} idr_blk_t;
 
 /* Returns the number of sectors to allocate for an inode SIZE
    bytes long. */
@@ -51,7 +70,9 @@ uint8_t *cache_buffer;
 /* 队列共用锁 */
 static struct lock queue_lock;
 
-/* In-memory inode. */
+/* 
+TODO 需要添加同步措施  
+In-memory inode. */
 struct inode {
   struct list_elem elem; /* Element in inode list. */
   block_sector_t sector; /* Sector number of disk location. */
@@ -75,24 +96,26 @@ typedef struct meta {
 /* 64个meta的位置 */
 static meta_t *meta_buffer;
 
-static void read_from_sector(off_t sector, uint8_t *buffer);
-static void write_to_sector(off_t sector, uint8_t *buffer);
-static meta_t *search_sector(off_t sector, bool load);
+static void read_from_sector(block_sector_t sector, uint8_t *buffer);
+static void write_to_sector(block_sector_t sector, uint8_t *buffer);
+static meta_t *search_sector(block_sector_t sector, bool load);
 
 /**
  * @brief 线程安全地对META指向的Cache Block执行READ_ACTION，读取其中数据，完成后递减worker_cnt
  *
  * @param __meta 待读取的meta
  * @param read_action 读取操作（不会递增Dirty Bit）
+ *
+ * @note __meta->worker_cnt必须大于1
  */
-#define safe_sector_read(__meta, read_action)                                                                  \
+#define safe_sector_read(__meta, read_action)                                                                \
   do {                                                                                                       \
-    lock_acquire(&__meta->block_lock);                                                                         \
+    lock_acquire(&__meta->block_lock);                                                                       \
     { read_action; }                                                                                         \
-    lock_release(&__meta->block_lock);                                                                         \
-    lock_acquire(&__meta->meta_lock);                                                                          \
-    __meta->worker_cnt--;                                                                                      \
-    lock_release(&__meta->meta_lock);                                                                          \
+    lock_release(&__meta->block_lock);                                                                       \
+    lock_acquire(&__meta->meta_lock);                                                                        \
+    __meta->worker_cnt--;                                                                                    \
+    lock_release(&__meta->meta_lock);                                                                        \
   } while (0)
 
 /**
@@ -100,16 +123,18 @@ static meta_t *search_sector(off_t sector, bool load);
  *
  * @param __meta 待写入的meta
  * @param write_action 写入操作（设置Dirty Bit）
+ *
+ * @note __meta->worker_cnt必须大于1
  */
-#define safe_sector_write(__meta, write_action)                                                                \
+#define safe_sector_write(__meta, write_action)                                                              \
   do {                                                                                                       \
-    lock_acquire(&__meta->block_lock);                                                                         \
+    lock_acquire(&__meta->block_lock);                                                                       \
     { write_action; }                                                                                        \
-    __meta->dirty = true;                                                                                      \
-    lock_release(&__meta->block_lock);                                                                         \
-    lock_acquire(&__meta->meta_lock);                                                                          \
-    __meta->worker_cnt--;                                                                                      \
-    lock_release(&__meta->meta_lock);                                                                          \
+    __meta->dirty = true;                                                                                    \
+    lock_release(&__meta->block_lock);                                                                       \
+    lock_acquire(&__meta->meta_lock);                                                                        \
+    __meta->worker_cnt--;                                                                                    \
+    lock_release(&__meta->meta_lock);                                                                        \
   } while (0)
 
 /* TODO 实现需修改，估计需要加一段“从Buffer Cache中获取Inode”的代码
@@ -132,7 +157,9 @@ static block_sector_t byte_to_sector(const struct inode *inode, off_t pos) {
 }
 
 /* List of open inodes, so that opening a single inode twice
-   returns the same `struct inode'. */
+   returns the same `struct inode'.
+   TODO 需要添加同步措施  
+    */
 static struct list open_inodes;
 
 /* Initializes the inode module. */
@@ -269,7 +296,7 @@ void inode_close(struct inode *inode) {
       free_map_release(inode->sector, 1);
       meta_t *meta = search_sector(inode->sector, true);
       block_sector_t start;
-      safe_sector_read(meta, { start = ((struct inode_disk *)meta->block)->start; }); 
+      safe_sector_read(meta, { start = ((struct inode_disk *)meta->block)->start; });
       free_map_release(start, bytes_to_sectors(inode->length));
     }
 
@@ -436,15 +463,28 @@ void inode_allow_write(struct inode *inode) {
   inode->deny_write_cnt--;
 }
 
-
 /**
  * @brief 将队列中所有的Dirty Block写入磁盘
- * 
+ *
  * @note 只能在文件系统被关闭时调用
- * 
+ *
  */
-void flush_buffer_cache(){
-  
+void flush_buffer_cache() {
+  struct list *active_queue = &active_blocks;
+  struct list *sc_queue = &sc_blocks;
+  meta_t *pos = NULL;
+  list_reverse_for_each_entry(pos, sc_queue, elem) {
+    if (pos->dirty) {
+      block_write(fs_device, pos->sector, pos->block);
+      pos->dirty = false;
+    }
+  }
+  list_reverse_for_each_entry(pos, active_queue, elem) {
+    if (pos->dirty) {
+      block_write(fs_device, pos->sector, pos->block);
+      pos->dirty = false;
+    }
+  }
 }
 
 /* Returns the length, in bytes, of INODE's data. */
@@ -609,7 +649,7 @@ static void evict_meta_bottom_half(meta_t *meta, off_t sector, bool load) {
  *
  * @post result->worker_cnt > 0
  * */
-static meta_t *search_sector(off_t sector, bool load) {
+static meta_t *search_sector(block_sector_t sector, bool load) {
   lock_acquire(&queue_lock);
 
   meta_t *result = NULL;
@@ -644,7 +684,7 @@ done:
  * @param sector 目标扇区
  * @param buffer 待覆写内容，大小至少为512 Byte
  */
-static void write_to_sector(off_t sector, uint8_t *buffer) {
+static void write_to_sector(block_sector_t sector, uint8_t *buffer) {
   meta_t *meta = search_sector(sector, false);
   safe_sector_write(meta, { memcpy(meta->block, buffer, BLOCK_SECTOR_SIZE); });
 }
@@ -655,7 +695,110 @@ static void write_to_sector(off_t sector, uint8_t *buffer) {
  * @param sector 目标扇区
  * @param buffer 缓存，大小至少为512 Byte
  */
-static void read_from_sector(off_t sector, uint8_t *buffer) {
+static void read_from_sector(block_sector_t sector, uint8_t *buffer) {
   meta_t *meta = search_sector(sector, true);
   safe_sector_read(meta, { memcpy(buffer, meta->block, BLOCK_SECTOR_SIZE); });
+}
+
+/**
+ * @brief 创建一个扇区并将Buffer中的内容写入其中
+ *
+ * @param buffer
+ * @return block_sector_t 成功时返回扇区下标，失败时返回INIT_SECTOR
+ */
+static block_sector_t create_write_sector(uint8_t *buffer) {
+  block_sector_t sector = INIT_SECTOR;
+  // 为新扇区分配空间
+  if (!free_map_allocate(1, &sector)) {
+    return INIT_SECTOR;
+  }
+  ASSERT(sector != INIT_SECTOR);
+
+  // 腾出一个meta
+  lock_acquire(&queue_lock);
+  meta_t *meta = NULL;
+  meta = evict_meta_top_half(sector);
+  lock_release(&queue_lock);
+  evict_meta_bottom_half(meta, sector, false);
+
+  // 写入新数据
+  safe_sector_write(meta, { memcpy(meta->block, buffer, BLOCK_SECTOR_SIZE); });
+
+  return sector;
+}
+
+/**
+ * @brief 仿照Dic中的实例设计的扇区分配函数，为IDR_BLOCK增加到SECTOR_CNT个扇区。
+ * 如果SECTOR_CNT > INDIRECT_BLOCK_PTR_COUNT（128），那么会将IDR_BLOCK中所有空余位置都使用新扇区填补。
+ * 同时，假设IDR_BLOCK中已分配扇区的位置非零，未分配扇区的位置为零。
+ *
+ * @note 此函数只不会执行任何同步操作
+ *
+ * @param idr_block 待修改的间接块
+ * @param sector_cnt 成果物中应当含有多少个扇区
+ * @param spare_sector 是否使用Spare Sector填补空间？
+ * @return true
+ * @return false
+ */
+static bool indirect_block_resize(idr_blk_t *idr_block, block_sector_t sector_cnt, bool spare_sector) {
+  // 所分配的第一个新扇区在idr_block中的下标
+  block_sector_t tail_of_idr_block = INIT_SECTOR;
+  bool success = false;
+  for (int i = 0; i < INDIRECT_BLOCK_PTR_COUNT; i++) {
+    if (idr_block->arr[i] == 0 && i < sector_cnt) {
+      // Grow
+      if (tail_of_idr_block == INIT_SECTOR) {
+        // Beginning of new free sector
+        tail_of_idr_block = i;
+      }
+      if (spare_sector) {
+        idr_block->arr[i] = SPARSE_FILE_SECTOR;
+      } else {
+        if (!free_map_allocate(1, idr_block->arr + i)) {
+          goto done;
+        }
+      }
+    } else if (idr_block->arr[i] != 0 && i >= sector_cnt) {
+      // Shrink
+      if (!spare_sector) {
+        free_map_release(idr_block->arr + i, 1);
+      }
+      idr_block->arr[i] = 0;
+    }
+  }
+  success = true;
+done:
+// 如果分配新扇区失败，需要将所有新分配的扇区都释放
+  if (!success) {
+    for (int i = tail_of_idr_block; i < INDIRECT_BLOCK_PTR_COUNT; i++) {
+      if (idr_block->arr[i] != 0) {
+        // TODO 其实不用检测，直接释放就可以
+        if (!spare_sector) {
+          free_map_release(idr_block->arr + i, 1);
+        }
+      } else {
+        break;
+      }
+    }
+  }
+  return success;
+}
+
+/**
+ * @brief 将文件扩大到令INODE足以附加大小为 SIZE + OFFSET 的新数据。确保当磁盘分配失败时inode中的数据不会被影响
+ * @pre 获取inode
+ * 
+ * @note 读取inode.block时，不会执行同步操作
+ * 
+ * @param inode 
+ * @param size 
+ * @param offset 
+ */
+void enlarge_inode(struct inode *inode, off_t size, off_t offset ){
+  // 首先将所有需要的间接块分配完毕之后（当然是货真价实地调用create_write_sector分配间接块）
+  // 整体计算还是采用扇区数量进行计算好了，每当调用create_write_sector递减本次分配的扇区数量
+  // 再调用indirect_block_resize为各间接块分配直接块
+
+  // 如果EOF本身就位于某个间接块的末尾，可以通过取整128进行判断
+
 }
