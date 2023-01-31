@@ -25,6 +25,8 @@
 
 /* 1.6 TB */
 #define INIT_SECTOR 0xCCCCCCCC
+/* 8 MB */
+#define MAX_FILE_LENGTH 8 * 1024 * 1024
 
 /* Inode中各种块指针的数目 */
 #define INODE_DIRECT_COUNT 64
@@ -932,7 +934,38 @@ done:
 }
 
 /**
- * @brief 在`idr_block_arr`指向的间接块区域中分配足够容纳`except_sector_cnt`个扇区的间接块和直接块
+ * @brief 为`dr_arr`的`[alloc_sector_cnt, except_sector_cnt)`部分分配新扇区
+ *
+ * @param dr_arr 指向Inode中直接块部分的指针
+ * @param alloced_sector_cnt
+ * @param except_sector_cnt
+ * @return true
+ * @return false
+ */
+
+static bool alloc_direct_portion(block_sector_t *dr_arr, block_sector_t alloc_sector_cnt,
+                                 block_sector_t except_sector_cnt) {
+  bool success = false;
+  for (int i = alloc_sector_cnt; i != except_sector_cnt; i++) {
+    ASSERT(dr_arr[i] == 0);
+    if (!free_map_allocate(1, dr_arr + i)) {
+      goto done;
+    }
+  }
+  success = true;
+done:
+  if (!success) {
+    for (int i = alloc_sector_cnt; i != except_sector_cnt && dr_arr[i] != 0; i++) {
+      free_map_release(dr_arr[i], 1);
+      dr_arr[i] == 0;
+    }
+  }
+  return success;
+}
+/**
+ * @brief 在`idr_block_arr`指向的间接块区域中分配足够容纳`except_sector_cnt`个扇区的间接块和直接块。
+ * 此函数可被递归调用一次，如果`root`为`true`，那么此函数会分配一个二级间接块并在其基础上递归一次，反之不会
+ * 执行递归逻辑
  *
  * @pre `except_sector_cnt`, `alloc_sector_cnt`的单位都是扇区
  * @pre alloc_sector_cnt > INODE_DIRECT_COUNT
@@ -943,13 +976,12 @@ done:
  * @param arr_length 数组的长度
  * @param alloc_sector_cnt 之前在此Inode区域中所分配的扇区数量
  * @param except_sector_cnt 期望在此区域中分配的扇区数量
+ * @param root 是否分配二级间接块并执行递归？
  * @return true 分配成功
  * @return false 分配失败
  */
 static bool alloc_indirect_portion(block_sector_t *idr_block_arr, block_sector_t arr_length,
-                                   block_sector_t alloc_sector_cnt, block_sector_t except_sector_cnt) {
-  ASSERT(except_sector_cnt > INODE_DIRECT_COUNT);
-
+                                   block_sector_t alloc_sector_cnt, block_sector_t except_sector_cnt, bool root) {
   bool success = false;
   // EOF在其间接块内部的下标
   int in_block_idx = alloc_sector_cnt > 0 ? -1 : (alloc_sector_cnt - 1) % INDIRECT_BLOCK_PTR_COUNT;
@@ -1002,7 +1034,8 @@ done:
     if (indirect_blk_idx > 0) {
       meta_t *meta = search_sector(idr_block_arr[indirect_blk_idx], true);
       // 由于需要保留EOF原来所在的扇区，因此需要加一
-      safe_sector_write(meta, { resize_indirect_block(idr_block_arr[indirect_blk_idx], in_block_idx + 1, false); });
+      safe_sector_write(meta,
+                        { resize_indirect_block(idr_block_arr[indirect_blk_idx], in_block_idx + 1, false); });
     }
   }
   return success;
@@ -1025,7 +1058,52 @@ static bool enlarge_inode(struct inode *inode, off_t size, off_t offset) {
   // 再调用indirect_block_resize为各间接块分配直接块
 
   // 如果EOF本身就位于某个间接块的末尾，可以通过取整128进行判断
-  
-  if()
 
+  if (size + offset > MAX_FILE_LENGTH) {
+    return false;
+  }
+
+  block_sector_t prev_sector_cnt = bytes_to_sectors(inode->length);
+  block_sector_t except_sector_cnt = bytes_to_sectors(size + offset);
+  meta_t *meta = search_sector(inode->sector, true);
+  struct inode_disk *inode_disk = (struct inode_disk *)meta->block;
+  lock_acquire(&meta->block_lock);
+
+  /*
+    下列注释中的[]指的是Inode中的指针区域：
+    [ Inode中直接块指针区域 ]：[0, INODE_DIRECT_COUNT)
+    [ Inode中间接块指针区域 ]：[INODE_DIRECT_COUNT, INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE)
+    [ 二级间接块中的间接指针区域 ]：[INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE, MAX_FILE_LENGTH /
+  BLOCK_SECTOR_SIZE)
+  */
+  if (prev_sector_cnt <= INODE_DIRECT_COUNT) {
+    /* Case 1: [ EOF, New EOF] [ ] [ ] */
+    if (except_sector_cnt <= INODE_DIRECT_COUNT) {
+      alloc_direct_portion(inode_disk->dr_arr, prev_sector_cnt, except_sector_cnt);
+    }
+    /* Case 2: [ EOF ] [ New EOF ] [ ] */
+    else if (except_sector_cnt <= INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE) {
+      alloc_direct_portion(inode_disk->dr_arr, prev_sector_cnt, INODE_DIRECT_COUNT);
+      alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, prev_sector_cnt - INODE_DIRECT_COUNT, except_sector_cnt - INODE_DIRECT_COUNT);
+    }
+    /* Case 3: [ EOF ] [ ] [ New EOF ] */
+    else {
+    }
+
+  } else if (prev_sector_cnt <= INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE) {
+    /* Case 4: [ ] [ EOF, New EOF ] [  ] */
+    if (prev_sector_cnt <= INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE) {
+
+    }
+    /* Case 5: [ ] [ EOF ] [  New EOF ] */
+    else {
+    }
+  }
+  /* Case 6: [ ] [ ] [ EOF, New EOF ] */
+  else {
+  }
+  lock_release(&meta->block_lock);
+  lock_acquire(&meta->meta_lock);
+  meta->worker_cnt--;
+  lock_release(&meta->meta_lock);
 }
