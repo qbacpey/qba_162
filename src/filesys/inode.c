@@ -35,6 +35,14 @@
 /* 二级间接块可容纳的指针数量 */
 #define DB_INDIRECT_BLOCK_PTR_COUNT 128
 
+#ifndef max
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+
+#ifndef min
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+
 /* On-disk inode.
    Must be exactly BLOCK_SECTOR_SIZE bytes long. */
 struct inode_disk {
@@ -731,23 +739,23 @@ static block_sector_t create_write_sector(uint8_t *buffer) {
 
 /**
  * @brief 仿照Dic中的实例设计的扇区分配函数，为IDR_BLOCK增加到SECTOR_CNT个扇区。
- * 如果SECTOR_CNT > INDIRECT_BLOCK_PTR_COUNT（128），那么会将IDR_BLOCK中所有空余位置都使用新扇区填补。
+ * 如果SECTOR_CNT >= INDIRECT_BLOCK_PTR_COUNT（128），那么会将IDR_BLOCK中所有空余位置都使用新扇区填补。
  * 同时，假设IDR_BLOCK中已分配扇区的位置非零，未分配扇区的位置为零。
  *
  * @note 此函数只不会执行任何同步操作
  *
  * @param idr_block 待修改的间接块
- * @param sector_cnt 成果物中应当含有多少个扇区
+ * @param sector_tail 成果物中应当含有多少个扇区，上限为128
  * @param spare_sector 是否使用Spare Sector填补空间？
  * @return true
  * @return false
  */
-static bool resize_indirect_block(idr_block_t *idr_block, block_sector_t sector_cnt, bool spare_sector) {
+static bool resize_indirect_block(idr_block_t *idr_block, block_sector_t sector_tail, bool spare_sector) {
   // 所分配的第一个新扇区在idr_block中的下标
   block_sector_t tail_of_idr_block = INIT_SECTOR;
   bool success = false;
   for (int i = 0; i < INDIRECT_BLOCK_PTR_COUNT; i++) {
-    if (idr_block->arr[i] == 0 && i < sector_cnt) {
+    if (idr_block->arr[i] == 0 && i < sector_tail) {
       // Grow
       if (tail_of_idr_block == INIT_SECTOR) {
         // Beginning of new free sector
@@ -760,7 +768,7 @@ static bool resize_indirect_block(idr_block_t *idr_block, block_sector_t sector_
           goto done;
         }
       }
-    } else if (idr_block->arr[i] != 0 && i >= sector_cnt) {
+    } else if (idr_block->arr[i] != 0 && i >= sector_tail) {
       // Shrink
       if (idr_block->arr[i] != SPARSE_FILE_SECTOR) {
         free_map_release(idr_block->arr + i, 1);
@@ -787,7 +795,7 @@ done:
 }
 
 /**
- * @brief 释放`idr_arr`中 [begin_idx, tail_idx) 之间的所有间接块扇区
+ * @brief 释放`idr_arr`中 [begin_idx, tail_idx) 之间的所有间接块扇区以及其中所含的直接块扇区
  *
  * @param inode 指向Inode中间接块的部分的指针
  * @param begin_idx idr_arr中第一个被新分配的间接块的下标
@@ -845,15 +853,16 @@ static void handle_phrase_3_error(dbi_block_t *dbib, block_sector_t old_ib_in_db
  * 也可以是必须为使用calloc分配之后使用memcpy拷贝过来的对象，但函数不会在对Inode执行拷贝操作时同步
  *
  * @param inode Inode被读取到内存中的Buffer，必须持有对应的写者锁
- * @param old_eof 旧文件的扇区数量，单位为扇区个数（利用byte_to_sector转换）
+ * @param alloc_sector_cnt 旧文件的扇区数量，单位为扇区个数（利用byte_to_sector转换）
  * @param eof 新文件的扇区数量，单位为扇区个数（利用byte_to_sector转换）
  * @return true 分配成功，现在持有的间接块足以完全容纳EOF
  * @return false 分配失败，维持INODE不变
  */
-static bool alloc_indirect_block(struct inode_disk *inode, block_sector_t old_eof, block_sector_t eof) {
-  ASSERT(old_eof < eof);
+static bool alloc_indirect_block(struct inode_disk *inode, block_sector_t alloc_sector_cnt,
+                                 block_sector_t eof) {
+  ASSERT(alloc_sector_cnt < eof);
   ASSERT(eof > INODE_DIRECT_COUNT);
-  ASSERT(old_eof > INODE_DIRECT_COUNT);
+  ASSERT(alloc_sector_cnt > INODE_DIRECT_COUNT);
   ASSERT(eof < 8 * 1024 * 2);
   bool success = false;
 
@@ -923,70 +932,77 @@ done:
 }
 
 /**
- * @brief 分配INODE中的idr_arr数组，确保尽可能能容纳得下EOF个扇区。分配失败回滚修改
+ * @brief 在`idr_block_arr`指向的间接块区域中分配足够容纳`except_sector_cnt`个扇区的间接块和直接块
  *
- * @pre `eof`, `old_eof`的单位都是扇区
- * @pre old_eof > INODE_DIRECT_COUNT
- * @pre eof > INODE_DIRECT_COUNT
+ * @pre `except_sector_cnt`, `alloc_sector_cnt`的单位都是扇区
+ * @pre alloc_sector_cnt > INODE_DIRECT_COUNT
+ * @pre except_sector_cnt > INODE_DIRECT_COUNT
  *
- * @param inode
- * @param old_eof INODE中之前所含扇区数目
- * @param eof 目标扇区数目，可大于 INDIRECT_BLOCK_PTR_COUNT * INODE_INDIRECT_COUNT
+ * @param idr_block_arr
+ * 指向间接块数组的第一个元素，既可以是Inode中原生的间接块数组，也可以是二级间接块中的数组
+ * @param arr_length 数组的长度
+ * @param alloc_sector_cnt 之前在此Inode区域中所分配的扇区数量
+ * @param except_sector_cnt 期望在此区域中分配的扇区数量
  * @return true 分配成功
  * @return false 分配失败
  */
-static bool alloc_indirect_portion(struct inode_disk *inode, block_sector_t old_eof, block_sector_t eof) {
-  ASSERT(eof > INODE_DIRECT_COUNT);
-  if (old_eof > INODE_DIRECT_COUNT + INODE_INDIRECT_COUNT * INDIRECT_BLOCK_PTR_COUNT) {
-    return true;
-  }
+static bool alloc_indirect_portion(block_sector_t *idr_block_arr, block_sector_t arr_length,
+                                   block_sector_t alloc_sector_cnt, block_sector_t except_sector_cnt) {
+  ASSERT(except_sector_cnt > INODE_DIRECT_COUNT);
+
   bool success = false;
-  // 计算保存EOF需要的扇区数量
-  eof -= INODE_DIRECT_COUNT;
-  old_eof -= INODE_DIRECT_COUNT;
   // EOF在其间接块内部的下标
-  int eof_idr_block = old_eof > 0 ? old_eof : old_eof % INDIRECT_BLOCK_PTR_COUNT;
+  int in_block_idx = alloc_sector_cnt > 0 ? -1 : (alloc_sector_cnt - 1) % INDIRECT_BLOCK_PTR_COUNT;
+  // EOF所在间接块的下标
+  int indirect_blk_idx = alloc_sector_cnt > 0 ? -1 : alloc_sector_cnt / INDIRECT_BLOCK_PTR_COUNT;
   // 第一个被成功分配的新间接块
   block_sector_t first_idr_block = 0;
   // 最后一个被成功分配的新间接块的尾后下标
   block_sector_t last_idr_block = 0;
-  for (int i = 0; i != INODE_INDIRECT_COUNT; i++) {
-    if (eof > 0) {
-      if (old_eof < (i + 1) * INDIRECT_BLOCK_PTR_COUNT &&
-          inode->idr_arr[i] != 0) { // 文件旧的EOF位于此间接块中
-        meta_t *meta = search_sector(inode->idr_arr[i], true);
-        idr_block_t *indirect_block = (idr_block_t *)meta->block;
-        safe_sector_write(
-            meta, { success = resize_indirect_block(indirect_block, INDIRECT_BLOCK_PTR_COUNT, false); });
-      } else if (inode->idr_arr[i] == 0) { // 需要在此位置分配新的间接块
-        if (first_idr_block == 0) {
-          first_idr_block = i;
-        }
-        last_idr_block = i;
-        if (!free_map_allocate(1, inode->idr_arr + i)) {
-          goto done;
-        }
-        // 由于inode->idr_arr[i]分配成功，需要last_idr_block++才是尾后间接块下标
-        last_idr_block++;
-
-        meta_t *meta = search_sector(inode->idr_arr[i], false);
-        idr_block_t *indirect_block = (idr_block_t *)meta->block;
-        safe_sector_write(meta, { success = resize_indirect_block(indirect_block, eof, false); });
+  for (int i = 0; i != arr_length; i++) {
+    if (idr_block_arr[i] == 0 && except_sector_cnt > 0) { // 需要在此位置分配新的间接块
+      if (first_idr_block == 0) {
+        first_idr_block = i;
       }
-      if (!success) {
+      last_idr_block = i;
+      if (!free_map_allocate(1, idr_block_arr + i)) {
         goto done;
       }
-      eof -= INDIRECT_BLOCK_PTR_COUNT;
+      // 由于idr_block_arr[i]分配成功，需要last_idr_block++才是尾后间接块下标
+      last_idr_block++;
+      meta_t *meta = search_sector(idr_block_arr[i], false);
+      idr_block_t *indirect_block = (idr_block_t *)meta->block;
+      safe_sector_write(meta, {
+        success =
+            resize_indirect_block(indirect_block, min(except_sector_cnt, INDIRECT_BLOCK_PTR_COUNT), false);
+      });
+    } else if (i == indirect_blk_idx && idr_block_arr[i] != 0) { // 文件旧的EOF位于此间接块中
+      meta_t *meta = search_sector(idr_block_arr[i], true);
+      idr_block_t *indirect_block = (idr_block_t *)meta->block;
+      safe_sector_write(meta, {
+        // 如果这个间接块不会被填满的话，需要将后边所有的直接块都设置为0
+        if (except_sector_cnt < INDIRECT_BLOCK_PTR_COUNT) {
+          memset(idr_block_arr + i, 0, INDIRECT_BLOCK_PTR_COUNT);
+        }
+        success = resize_indirect_block(indirect_block, INDIRECT_BLOCK_PTR_COUNT, false);
+      });
+    }
+    except_sector_cnt -= INDIRECT_BLOCK_PTR_COUNT;
+
+    if (!success) {
+      goto done;
     }
   }
   success = true;
 done:
   if (!success) {
-    release_full_indirect_block(inode->idr_arr, first_idr_block, last_idr_block);
-    if(eof_idr_block > 0){
-      meta_t *meta = search_sector(inode->idr_arr[eof_idr_block], true);
-      safe_sector_write(meta, { resize_indirect_block(inode->idr_arr[eof_idr_block], 0, false); });
-      free_map_release(inode->idr_arr[eof_idr_block], 1);
+    // 释放所有新分配的间接块
+    release_full_indirect_block(idr_block_arr, first_idr_block, last_idr_block);
+    // 需要将EOF所在间接块回归原样
+    if (indirect_blk_idx > 0) {
+      meta_t *meta = search_sector(idr_block_arr[indirect_blk_idx], true);
+      // 由于需要保留EOF原来所在的扇区，因此需要加一
+      safe_sector_write(meta, { resize_indirect_block(idr_block_arr[indirect_blk_idx], in_block_idx + 1, false); });
     }
   }
   return success;
@@ -1003,10 +1019,13 @@ done:
  * @param size
  * @param offset
  */
-void enlarge_inode(struct inode *inode, off_t size, off_t offset) {
+static bool enlarge_inode(struct inode *inode, off_t size, off_t offset) {
   // 首先将所有需要的间接块分配完毕之后（当然是货真价实地调用create_write_sector分配间接块）
   // 整体计算还是采用扇区数量进行计算好了，每当调用create_write_sector递减本次分配的扇区数量
   // 再调用indirect_block_resize为各间接块分配直接块
 
   // 如果EOF本身就位于某个间接块的末尾，可以通过取整128进行判断
+  
+  if()
+
 }
