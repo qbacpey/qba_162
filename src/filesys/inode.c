@@ -28,9 +28,13 @@
 /* 8 MB */
 #define MAX_FILE_LENGTH 8 * 1024 * 1024
 
-/* Inode中各种块指针的数目 */
+/* Inode直属直接块指针的数目 */
 #define INODE_DIRECT_COUNT 64
+/* Inode直属间接块指针的数目 */
 #define INODE_INDIRECT_COUNT 48
+/* Inode直属间接块部分可表示的扇区数目 */
+#define INODE_INDIRECT_SECTOR_COUNT INODE_INDIRECT_COUNT *BLOCK_SECTOR_SIZE
+/* Inode直属二级间接块指针的数目 */
 #define INODE_DB_INDIRECT_COUNT 1
 /* 间接块可容纳的指针数量 */
 #define INDIRECT_BLOCK_PTR_COUNT 128
@@ -89,7 +93,6 @@ struct inode {
   struct list_elem elem; /* Element in inode list. */
   block_sector_t sector; /* Sector number of disk location. */
   int open_cnt;          /* Number of openers. */
-  off_t length;          /* File size in bytes. */
   bool removed;          /* True if deleted, false otherwise. */
   int deny_write_cnt;    /* 0: writes ok, >0: deny writes. */
 };
@@ -110,7 +113,10 @@ static meta_t *meta_buffer;
 
 static void read_from_sector(block_sector_t sector, uint8_t *buffer);
 static void write_to_sector(block_sector_t sector, uint8_t *buffer);
-static meta_t *search_sector(block_sector_t sector, bool load);
+static meta_t *search_sector_head(block_sector_t sector, bool load);
+static void search_sector_tail(meta_t *);
+static bool enlarge_inode(struct inode_disk *, off_t size, off_t offset);
+static void dealloc_inode(struct inode *);
 
 /**
  * @brief 线程安全地对META指向的Cache Block执行READ_ACTION，读取其中数据，完成后递减worker_cnt
@@ -125,9 +131,7 @@ static meta_t *search_sector(block_sector_t sector, bool load);
     lock_acquire(&__meta->block_lock);                                                                       \
     { read_action; }                                                                                         \
     lock_release(&__meta->block_lock);                                                                       \
-    lock_acquire(&__meta->meta_lock);                                                                        \
-    __meta->worker_cnt--;                                                                                    \
-    lock_release(&__meta->meta_lock);                                                                        \
+    search_sector_tail(__meta);                                                                              \
   } while (0)
 
 /**
@@ -144,14 +148,10 @@ static meta_t *search_sector(block_sector_t sector, bool load);
     { write_action; }                                                                                        \
     __meta->dirty = true;                                                                                    \
     lock_release(&__meta->block_lock);                                                                       \
-    lock_acquire(&__meta->meta_lock);                                                                        \
-    __meta->worker_cnt--;                                                                                    \
-    lock_release(&__meta->meta_lock);                                                                        \
+    search_sector_tail(__meta);                                                                              \
   } while (0)
 
-/* TODO 实现需修改，估计需要加一段“从Buffer Cache中获取Inode”的代码
-
-  Returns the block device sector that contains byte offset POS
+/* Returns the block device sector that contains byte offset POS
    within INODE.
    计算POS在文件INODE中位于哪一个扇区中，返回该扇区下标
 
@@ -159,13 +159,59 @@ static meta_t *search_sector(block_sector_t sector, bool load);
    POS. */
 static block_sector_t byte_to_sector(const struct inode *inode, off_t pos) {
   ASSERT(inode != NULL);
-  block_sector_t start;
-  meta_t *meta = search_sector(inode->sector, true);
-  safe_sector_read(meta, { start = ((struct inode_disk *)meta->block)->start; });
-  if (pos < inode->length)
-    return start + pos / BLOCK_SECTOR_SIZE;
-  else
-    return -1;
+  meta_t *meta = search_sector_head(inode->sector, true);
+  block_sector_t result = -1;
+  struct inode_disk *inode_disk = (struct inode_disk *)meta->block;
+  size_t sectors = bytes_to_sectors(pos);
+  // 如果大于现有文件大小，直接返回-1
+  if (pos >= inode_disk->length)
+    goto done;
+  
+  lock_acquire(&meta->block_lock);
+
+  /* POS位于直接块部分 */
+  if (sectors <= INODE_DIRECT_COUNT) {
+    result = sectors - 1;
+    goto done;
+  }
+
+  /* Inode直属间接块 */
+  if (sectors <= INODE_INDIRECT_SECTOR_COUNT) {
+    block_sector_t idr_portion_sector_cnt = sectors - INODE_DIRECT_COUNT;
+    size_t idr_block_idx = (idr_portion_sector_cnt) / BLOCK_SECTOR_SIZE;
+    size_t in_block_idx = (idr_portion_sector_cnt - 1) % INDIRECT_BLOCK_PTR_COUNT;
+    meta_t *idr_meta = search_sector_head(inode_disk->idr_arr[idr_block_idx], true);
+    safe_sector_read(idr_meta, {
+      idr_block_t *idr_block = (idr_block_t *)idr_meta->block;
+      result = idr_block->arr[in_block_idx];
+    });
+  }
+  /* 二级间接块 */
+  else {
+    ASSERT(inode_disk->dbi_arr != 0);
+    block_sector_t db_idr_portion_sector_cnt = sectors - INODE_INDIRECT_SECTOR_COUNT;
+    size_t db_idr_block_idx = (db_idr_portion_sector_cnt) / BLOCK_SECTOR_SIZE;
+    size_t in_block_idx = (db_idr_block_idx - 1) % INDIRECT_BLOCK_PTR_COUNT;
+    // POS所在间接块的扇区
+    block_sector_t idr_block_sector = 0;
+    // 首先将二级间接块读取出来
+    meta_t *db_meta = search_sector_head(inode_disk->dbi_arr, true);
+    safe_sector_read(db_meta, {
+      dbi_block_t *db_block = (dbi_block_t *)db_meta->block;
+      idr_block_sector = db_block->arr[db_idr_block_idx];
+    });
+    ASSERT(idr_block_sector != 0);
+    //  再从间接块中读取直接块的扇区
+    meta_t *idr_meta = search_sector_head(idr_block_sector, true);
+    safe_sector_read(idr_meta, {
+      idr_block_t *idr_block = (idr_block_t *)idr_meta->block;
+      result = idr_block->arr[in_block_idx];
+    });
+  }
+done:
+  lock_release(&meta->block_lock);
+  search_sector_tail(meta);
+  ASSERT(result != 0);
 }
 
 /* List of open inodes, so that opening a single inode twice
@@ -224,23 +270,28 @@ bool inode_create(block_sector_t sector, off_t length) {
   if (disk_inode != NULL) {
     /* 所需使用的扇区个数 */
     size_t sectors = bytes_to_sectors(length);
-    disk_inode->length = length;
+    disk_inode->length = 0;
     disk_inode->magic = INODE_MAGIC;
+    block_sector_t inode_sector = 0;
     /* 在Free Map中分配指定数目的的扇区，开始位置保存为disk_inode->start */
-    if (free_map_allocate(sectors, &disk_inode->start)) {
-      /* 将inode_disk写入到设备中 */
-      write_to_sector(sector, (uint8_t *)disk_inode);
-
-      if (sectors > 0) {
-        static char zeros[BLOCK_SECTOR_SIZE];
-        size_t i;
-
-        /* 将所有的数据扇区写入到文件中 */
-        for (i = 0; i < sectors; i++)
-          write_to_sector(disk_inode->start + i, (uint8_t *)zeros);
-      }
-      success = true;
+    if (free_map_allocate(1, &inode_sector) && !enlarge_inode(disk_inode, 0, length)) {
+      goto done;
     }
+    disk_inode->length = length;
+    write_to_sector(inode_sector, (uint8_t *)disk_inode);
+    if (sectors > 0) {
+      static char zeros[BLOCK_SECTOR_SIZE];
+      size_t i;
+
+      /* 将所有的数据扇区写入到文件中 */
+      for (i = 0; i < sectors; i++){
+        block_sector_t sec = bytes_to_sectors( i * BLOCK_SECTOR_SIZE + 1 );
+        ASSERT(sec != 0);
+        write_to_sector(sec, (uint8_t *)zeros);
+      }
+    }
+    success = true;
+  done:
     free(disk_inode);
   }
   return success;
@@ -273,10 +324,6 @@ struct inode *inode_open(block_sector_t sector) {
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
   inode->removed = false;
-
-  meta_t *meta = search_sector(inode->sector, true);
-  safe_sector_read(meta, { inode->length = ((struct inode_disk *)meta->block)->length; });
-
   return inode;
 }
 
@@ -305,11 +352,7 @@ void inode_close(struct inode *inode) {
 
     /* Deallocate blocks if removed. */
     if (inode->removed) {
-      free_map_release(inode->sector, 1);
-      meta_t *meta = search_sector(inode->sector, true);
-      block_sector_t start;
-      safe_sector_read(meta, { start = ((struct inode_disk *)meta->block)->start; });
-      free_map_release(start, bytes_to_sectors(inode->length));
+      dealloc_inode(inode);
     }
 
     free(inode);
@@ -408,6 +451,16 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
   off_t bytes_written = 0;
   uint8_t *bounce = NULL;
 
+  if(inode_length(inode) < size + offset){
+    meta_t *inode_meta = search_sector_head(inode, true);
+    bool success = false;
+    safe_sector_write(inode_meta, {
+      success = enlarge_inode(inode_meta, size, offset);
+    });
+    if(!success)
+      return 0;
+  }
+
   if (inode->deny_write_cnt)
     return 0;
 
@@ -500,7 +553,14 @@ void flush_buffer_cache() {
 }
 
 /* Returns the length, in bytes, of INODE's data. */
-off_t inode_length(const struct inode *inode) { return inode->length; }
+off_t inode_length(const struct inode *inode) { 
+  meta_t *meta = search_sector_head(inode->sector, true);
+  size_t length = 0;
+  safe_sector_read(meta, {
+    length = ((struct inode_disk *)meta->block)->length;
+  });
+  return length;
+}
 
 /**
  * @brief 将META从sc队列移动到at队列
@@ -661,7 +721,7 @@ static void evict_meta_bottom_half(meta_t *meta, off_t sector, bool load) {
  *
  * @post result->worker_cnt > 0
  * */
-static meta_t *search_sector(block_sector_t sector, bool load) {
+static meta_t *search_sector_head(block_sector_t sector, bool load) {
   lock_acquire(&queue_lock);
 
   meta_t *result = NULL;
@@ -691,13 +751,24 @@ done:
 }
 
 /**
+ * @brief `search_sector_head`执行完毕之后以此函数收尾，中途可以插入获取meta->block并操作其中内容的代码
+ *
+ * @param meta
+ */
+static void search_sector_tail(meta_t *meta) {
+  lock_acquire(&meta->meta_lock);
+  meta->worker_cnt--;
+  lock_release(&meta->meta_lock);
+}
+
+/**
  * @brief 将BUFFER中的内容覆写到SECTOR扇区中
  *
  * @param sector 目标扇区
  * @param buffer 待覆写内容，大小至少为512 Byte
  */
 static void write_to_sector(block_sector_t sector, uint8_t *buffer) {
-  meta_t *meta = search_sector(sector, false);
+  meta_t *meta = search_sector_head(sector, false);
   safe_sector_write(meta, { memcpy(meta->block, buffer, BLOCK_SECTOR_SIZE); });
 }
 
@@ -708,7 +779,7 @@ static void write_to_sector(block_sector_t sector, uint8_t *buffer) {
  * @param buffer 缓存，大小至少为512 Byte
  */
 static void read_from_sector(block_sector_t sector, uint8_t *buffer) {
-  meta_t *meta = search_sector(sector, true);
+  meta_t *meta = search_sector_head(sector, true);
   safe_sector_read(meta, { memcpy(buffer, meta->block, BLOCK_SECTOR_SIZE); });
 }
 
@@ -740,54 +811,56 @@ static block_sector_t create_write_sector(uint8_t *buffer) {
 }
 
 /**
- * @brief 仿照Dic中的实例设计的扇区分配函数，为IDR_BLOCK增加到SECTOR_CNT个扇区。
- * 如果SECTOR_CNT >= INDIRECT_BLOCK_PTR_COUNT（128），那么会将IDR_BLOCK中所有空余位置都使用新扇区填补。
- * 同时，假设IDR_BLOCK中已分配扇区的位置非零，未分配扇区的位置为零。
+ * @brief 仿照Dic中的实例设计的扇区分配函数，将`sectors`中直接块指针的数目变更为`except_sector_cnt`
+ * 如果`except_sector_cnt` >= length，那么会将`sectors`中所有空余位置都使用新扇区填补。
+ * 同时，假设`sectors`中已分配扇区的位置非零，未分配扇区的位置为零。
  *
  * @note 此函数只不会执行任何同步操作
  *
- * @param idr_block 待修改的间接块
- * @param sector_tail 成果物中应当含有多少个扇区，上限为128
+ * @param sectors 待修改的直接块指针数组
+ * @param length `sectors`长度
+ * @param except_sector_cnt 成果物中应当含有多少个扇区，上限为128
  * @param spare_sector 是否使用Spare Sector填补空间？
  * @return true
  * @return false
  */
-static bool resize_indirect_block(idr_block_t *idr_block, block_sector_t sector_tail, bool spare_sector) {
+static bool resize_direct_ptr_portion(block_sector_t *sectors, block_sector_t length,
+                                      block_sector_t except_sector_cnt, bool spare_sector) {
   // 所分配的第一个新扇区在idr_block中的下标
-  block_sector_t tail_of_idr_block = INIT_SECTOR;
+  block_sector_t begin_idx = INIT_SECTOR;
   bool success = false;
-  for (int i = 0; i < INDIRECT_BLOCK_PTR_COUNT; i++) {
-    if (idr_block->arr[i] == 0 && i < sector_tail) {
+  for (int i = 0; i < length; i++) {
+    if (sectors[i] == 0 && i < except_sector_cnt) {
       // Grow
-      if (tail_of_idr_block == INIT_SECTOR) {
+      if (begin_idx == INIT_SECTOR) {
         // Beginning of new free sector
-        tail_of_idr_block = i;
+        begin_idx = i;
       }
       if (spare_sector) {
-        idr_block->arr[i] = SPARSE_FILE_SECTOR;
+        sectors[i] = SPARSE_FILE_SECTOR;
       } else {
-        if (!free_map_allocate(1, idr_block->arr + i)) {
+        if (!free_map_allocate(1, sectors + i)) {
           goto done;
         }
       }
-    } else if (idr_block->arr[i] != 0 && i >= sector_tail) {
+    } else if (sectors[i] != 0 && i >= except_sector_cnt) {
       // Shrink
-      if (idr_block->arr[i] != SPARSE_FILE_SECTOR) {
-        free_map_release(idr_block->arr + i, 1);
+      if (sectors[i] != SPARSE_FILE_SECTOR) {
+        free_map_release(sectors + i, 1);
       }
-      idr_block->arr[i] = 0;
+      sectors[i] = 0;
     }
   }
   success = true;
 done:
   // 如果分配新扇区失败，需要将所有新分配的扇区都释放
   if (!success) {
-    for (int i = tail_of_idr_block; i < INDIRECT_BLOCK_PTR_COUNT; i++) {
-      if (idr_block->arr[i] != 0) {
-        // TODO 其实不用检测，直接释放就可以
-        if (!spare_sector) {
-          free_map_release(idr_block->arr + i, 1);
+    for (int i = begin_idx; i < length; i++) {
+      if (sectors[i] != 0) {
+        if (sectors[i] != SPARSE_FILE_SECTOR) {
+          free_map_release(sectors + i, 1);
         }
+        sectors[i] = 0;
       } else {
         break;
       }
@@ -809,163 +882,30 @@ static void release_full_indirect_block(block_sector_t *idr_arr, block_sector_t 
   ASSERT(begin_idx < INODE_DIRECT_COUNT);
   ASSERT(tail_idx < INODE_DIRECT_COUNT);
   for (int j = begin_idx; j != tail_idx; j++) {
-    meta_t *meta = search_sector(idr_arr[j], true);
-    safe_sector_write(meta, { resize_indirect_block(idr_arr[j], 0, false); });
-    free_map_release(idr_arr[j], 1);
+    if (idr_arr[j] != 0 && idr_arr[j] != SPARSE_FILE_SECTOR) {
+      meta_t *meta = search_sector_head(idr_arr[j], true);
+      lock_acquire(&meta->block_lock);
+      // 将间接块中的所有直接块清空
+      resize_direct_ptr_portion(idr_arr[j], INDIRECT_BLOCK_PTR_COUNT, 0, false);
+      meta->dirty = false;
+      meta->sector = INIT_SECTOR;
+
+      lock_release(&meta->block_lock);
+      search_sector_tail(meta);
+      free_map_release(idr_arr[j], 1);
+    }
+    idr_arr[j] = 0;
   }
 }
 
-/**
- * @brief 如果本次磁盘分配分配了新的二级间接块，需要将其释放
- *
- * @param inode
- * @param old_ib_cnt 文件中原有的间接块数目
- */
-static void handle_phrase_2_error(struct inode_disk *inode, block_sector_t old_ib_cnt) {
-  if (old_ib_cnt <= INODE_DIRECT_COUNT) {
-    if (inode->dbi_arr != 0) {
-      free_map_release(inode->dbi_arr, 1);
-      inode->dbi_arr = 0;
-    }
-  }
-}
-
-/**
- * @brief 释放db_indirect_block中所有新分配的间接块
- *
- * @param dbib double indirect block
- * @param old_ib_in_db 文件中原有的、位于二级间接块中的间接块数目
- * @param curr_eof 指向db_indirect_block中最后一个被分配的间接块
- */
-static void handle_phrase_3_error(dbi_block_t *dbib, block_sector_t old_ib_in_db, block_sector_t curr_eof) {
-  for (int j = curr_eof; j != old_ib_in_db - 1; j--) {
-    free_map_release(dbib->arr[j], 1);
-  }
-}
-
-/**
- * @brief 计算INODE如果要容纳EOF这么多扇区需要分配多少个间接块，在INODE中分配对应的新扇区作为间接块，
- * 如果要需要，也会分配二级间接块并腾出一个meta
- * 分配失败时会回滚操作，确保进入函数时的Inode和离开函数时的Inode一致。
- * @pre 文件旧扇区数目小于新扇区数目：old_eof < eof
- * @pre 文件的旧大小大于直接块可覆盖范围：old_eof > INODE_DIRECT_COUNT
- * @pre 文件的新大小小于8 MiB：eof < 8 * 1024 * 2
- *
- * @note INODE可以是Cache Buffer中的缓存，
- * 也可以是必须为使用calloc分配之后使用memcpy拷贝过来的对象，但函数不会在对Inode执行拷贝操作时同步
- *
- * @param inode Inode被读取到内存中的Buffer，必须持有对应的写者锁
- * @param alloc_sector_cnt 旧文件的扇区数量，单位为扇区个数（利用byte_to_sector转换）
- * @param eof 新文件的扇区数量，单位为扇区个数（利用byte_to_sector转换）
- * @return true 分配成功，现在持有的间接块足以完全容纳EOF
- * @return false 分配失败，维持INODE不变
- */
-static bool alloc_indirect_block(struct inode_disk *inode, block_sector_t alloc_sector_cnt,
-                                 block_sector_t eof) {
-  ASSERT(alloc_sector_cnt < eof);
-  ASSERT(eof > INODE_DIRECT_COUNT);
-  ASSERT(alloc_sector_cnt > INODE_DIRECT_COUNT);
-  ASSERT(eof < 8 * 1024 * 2);
-  bool success = false;
-
-  // 每一阶段的循环结束扇区
-  block_sector_t phrase_loop_end = INODE_INDIRECT_COUNT;
-  // 指向idr_arr中最后一个被分配的间接块
-  block_sector_t ib_end_index = old_ib_cnt;
-
-  /* Phrase 1： Alloc Indirect Block */
-  if (old_ib_cnt <= INODE_INDIRECT_COUNT) {
-    if (eof <= INODE_INDIRECT_COUNT) {
-      phrase_loop_end = eof;
-    } else {
-      phrase_loop_end = INODE_INDIRECT_COUNT;
-    }
-
-    // 由于old_eof是扇区数量而不是数组下标，因此可以直接将其作为第一个空下标处理
-    for (int i = old_ib_cnt; i != phrase_loop_end; i++) {
-      ASSERT(inode->idr_arr[i] == 0);
-      if (!free_map_allocate(1, inode->idr_arr + i)) {
-        ib_end_index = i - 1;
-        release_full_indirect_block(inode->idr_arr, old_ib_cnt, ib_end_index);
-        goto done;
-      }
-    }
-  }
-  ib_end_index = phrase_loop_end - 1;
-
-  success = true;
-
-  ASSERT(inode->dbi_arr != 0);
-  if (eof > INODE_INDIRECT_COUNT) {
-    /* Phrase 2： Alloc Double Indirect Block */
-    if (inode->dbi_arr == 0 && !free_map_allocate(1, inode->dbi_arr)) {
-      handle_phrase_2_error(inode, old_ib_cnt);
-      release_full_indirect_block(inode->idr_arr, old_ib_cnt, ib_end_index);
-      goto done;
-    }
-
-    /* Phrase 3： Alloc Indirect Block inside Double Indirect Block */
-
-    // eof现在反映在二级间接块中分配的间接块数目
-    eof -= INODE_INDIRECT_COUNT;
-
-    // 原先位于Double Indirect Block中的Indirect Block
-    const block_sector_t old_ib_in_db = old_ib_cnt - INODE_INDIRECT_COUNT;
-
-    // 二级间接块中可能有已经分配的间接块
-    meta_t *db_idr_meta = search_sector(inode->dbi_arr, true);
-    safe_sector_write(db_idr_meta, {
-      dbi_block_t *db_idr_block = (dbi_block_t *)db_idr_meta->block;
-
-      for (int i = old_ib_in_db; i < eof; i++) {
-        ASSERT(db_idr_block->arr[i] == 0);
-        if (!free_map_allocate(1, db_idr_block->arr + i)) {
-          handle_phrase_3_error(db_idr_block, old_ib_in_db, i - 1);
-          handle_phrase_2_error(inode, old_ib_cnt);
-          release_full_indirect_block(inode->idr_arr, old_ib_cnt, ib_end_index);
-          success = false;
-          break;
-        }
-      }
-    });
-  }
-done:
-  return success;
-}
-
-/**
- * @brief 为`dr_arr`的`[alloc_sector_cnt, except_sector_cnt)`部分分配新扇区
- *
- * @param dr_arr 指向Inode中直接块部分的指针
- * @param alloced_sector_cnt
- * @param except_sector_cnt
- * @return true
- * @return false
- */
-
-static bool alloc_direct_portion(block_sector_t *dr_arr, block_sector_t alloc_sector_cnt,
-                                 block_sector_t except_sector_cnt) {
-  bool success = false;
-  for (int i = alloc_sector_cnt; i != except_sector_cnt; i++) {
-    ASSERT(dr_arr[i] == 0);
-    if (!free_map_allocate(1, dr_arr + i)) {
-      goto done;
-    }
-  }
-  success = true;
-done:
-  if (!success) {
-    for (int i = alloc_sector_cnt; i != except_sector_cnt && dr_arr[i] != 0; i++) {
-      free_map_release(dr_arr[i], 1);
-      dr_arr[i] == 0;
-    }
-  }
-  return success;
-}
 /**
  * @brief 在`idr_block_arr`指向的间接块区域中分配足够容纳`except_sector_cnt`个扇区的间接块和直接块。
  * 此函数可被递归调用一次，如果`root`为`true`，那么此函数会分配一个二级间接块并在其基础上递归一次，反之不会
  * 执行递归逻辑
+ *
+ * TODO 如果在此处添加一个用于描述`except_sector_cnt`中有多少个spare sector的参数的话，就可以实现spare file了
+ *
+ * @note 此函数的特定是确保执行失败时不会修改`idr_block_arr`中的数据
  *
  * @pre `except_sector_cnt`, `alloc_sector_cnt`的单位都是扇区
  * @pre alloc_sector_cnt > INODE_DIRECT_COUNT
@@ -977,11 +917,13 @@ done:
  * @param alloc_sector_cnt 之前在此Inode区域中所分配的扇区数量
  * @param except_sector_cnt 期望在此区域中分配的扇区数量
  * @param root 是否分配二级间接块并执行递归？
+ * @param db_block 二级间接块指针地址，如果root == true，其必须不为NULL
  * @return true 分配成功
  * @return false 分配失败
  */
 static bool alloc_indirect_portion(block_sector_t *idr_block_arr, block_sector_t arr_length,
-                                   block_sector_t alloc_sector_cnt, block_sector_t except_sector_cnt, bool root) {
+                                   block_sector_t alloc_sector_cnt, block_sector_t except_sector_cnt,
+                                   bool root, block_sector_t *db_block) {
   bool success = false;
   // EOF在其间接块内部的下标
   int in_block_idx = alloc_sector_cnt > 0 ? -1 : (alloc_sector_cnt - 1) % INDIRECT_BLOCK_PTR_COUNT;
@@ -1002,25 +944,53 @@ static bool alloc_indirect_portion(block_sector_t *idr_block_arr, block_sector_t
       }
       // 由于idr_block_arr[i]分配成功，需要last_idr_block++才是尾后间接块下标
       last_idr_block++;
-      meta_t *meta = search_sector(idr_block_arr[i], false);
+      meta_t *meta = search_sector_head(idr_block_arr[i], false);
       idr_block_t *indirect_block = (idr_block_t *)meta->block;
       safe_sector_write(meta, {
-        success =
-            resize_indirect_block(indirect_block, min(except_sector_cnt, INDIRECT_BLOCK_PTR_COUNT), false);
+        success = resize_direct_ptr_portion(indirect_block, INDIRECT_BLOCK_PTR_COUNT,
+                                            min(except_sector_cnt, INDIRECT_BLOCK_PTR_COUNT), false);
       });
+      except_sector_cnt -= INDIRECT_BLOCK_PTR_COUNT;
     } else if (i == indirect_blk_idx && idr_block_arr[i] != 0) { // 文件旧的EOF位于此间接块中
-      meta_t *meta = search_sector(idr_block_arr[i], true);
+      meta_t *meta = search_sector_head(idr_block_arr[i], true);
       idr_block_t *indirect_block = (idr_block_t *)meta->block;
       safe_sector_write(meta, {
         // 如果这个间接块不会被填满的话，需要将后边所有的直接块都设置为0
         if (except_sector_cnt < INDIRECT_BLOCK_PTR_COUNT) {
           memset(idr_block_arr + i, 0, INDIRECT_BLOCK_PTR_COUNT);
         }
-        success = resize_indirect_block(indirect_block, INDIRECT_BLOCK_PTR_COUNT, false);
+        success = resize_direct_ptr_portion(indirect_block, INDIRECT_BLOCK_PTR_COUNT,
+                                            INDIRECT_BLOCK_PTR_COUNT, false);
       });
+      except_sector_cnt = except_sector_cnt - (INDIRECT_BLOCK_PTR_COUNT - in_block_idx - 1);
     }
-    except_sector_cnt -= INDIRECT_BLOCK_PTR_COUNT;
 
+    if (!success) {
+      goto done;
+    }
+  }
+
+  // 是否需要递归一层二级间接块
+  if (root) {
+    ASSERT(db_block != NULL);
+    ASSERT(*db_block == 0);
+    ASSERT(except_sector_cnt > 0);
+    // 为新扇区分配空间
+    if (!free_map_allocate(1, db_block)) {
+      goto done;
+    }
+
+    // 腾出一个meta
+    lock_acquire(&queue_lock);
+    meta_t *meta = NULL;
+    meta = evict_meta_top_half(*db_block);
+    lock_release(&queue_lock);
+    evict_meta_bottom_half(meta, *db_block, false);
+
+    safe_sector_write(meta, {
+      success = alloc_indirect_portion((block_sector_t *)meta->block, INODE_DB_INDIRECT_COUNT, 0,
+                                       except_sector_cnt, false, NULL);
+    });
     if (!success) {
       goto done;
     }
@@ -1032,13 +1002,51 @@ done:
     release_full_indirect_block(idr_block_arr, first_idr_block, last_idr_block);
     // 需要将EOF所在间接块回归原样
     if (indirect_blk_idx > 0) {
-      meta_t *meta = search_sector(idr_block_arr[indirect_blk_idx], true);
+      meta_t *meta = search_sector_head(idr_block_arr[indirect_blk_idx], true);
       // 由于需要保留EOF原来所在的扇区，因此需要加一
-      safe_sector_write(meta,
-                        { resize_indirect_block(idr_block_arr[indirect_blk_idx], in_block_idx + 1, false); });
+      safe_sector_write(meta, {
+        resize_direct_ptr_portion(idr_block_arr[indirect_blk_idx], INDIRECT_BLOCK_PTR_COUNT, in_block_idx + 1,
+                                  false);
+      });
     }
   }
   return success;
+}
+
+/**
+ * @brief 释放`inode`
+ * 
+ * @param inode 
+ * @param arr_length 
+ */
+static void dealloc_inode(struct inode *inode) {
+  meta_t *meta = search_sector_head(inode->sector, true);
+  struct inode_disk *inode_disk = (struct inode_disk *)meta->block;
+  lock_acquire(&meta->block_lock);
+  // 释放直属直接块部分
+  resize_direct_ptr_portion(inode_disk->dr_arr, INODE_DIRECT_COUNT, 0, false);
+  // 释放直属间接块部分
+  release_full_indirect_block(inode_disk->idr_arr, 0, INODE_INDIRECT_COUNT);
+  if(inode_disk->dbi_arr != 0){
+    // 释放二级间接块
+    meta_t *db_block_meta = search_sector_head(inode_disk->dbi_arr, true);
+    dbi_block_t *db_block = (struct inode_disk *)db_block_meta->block;
+    lock_acquire(&db_block_meta->block_lock);
+    release_full_indirect_block(db_block->arr, 0, INDIRECT_BLOCK_PTR_COUNT);
+    // 注意需要确保`meta`中的数据不会造成危害
+    db_block_meta->dirty = false;
+    db_block_meta->sector = INIT_SECTOR;
+    lock_release(&db_block_meta->block_lock);
+    search_sector_tail(db_block_meta);
+    free_map_release(inode_disk->dbi_arr, 1);
+    inode_disk->dbi_arr = 0;
+  }
+  inode_disk->length = 0;
+  meta->dirty = false;
+  meta->sector = INIT_SECTOR;
+  lock_release(&meta->block_lock);
+  search_sector_tail(meta);
+  free_map_release(inode->sector, 1);
 }
 
 /**
@@ -1048,11 +1056,11 @@ done:
  *
  * @note 读取inode.block时，不会执行同步操作
  *
- * @param inode
+ * @param inode_disk
  * @param size
  * @param offset
  */
-static bool enlarge_inode(struct inode *inode, off_t size, off_t offset) {
+static bool enlarge_inode(struct inode_disk *inode_disk, off_t size, off_t offset) {
   // 首先将所有需要的间接块分配完毕之后（当然是货真价实地调用create_write_sector分配间接块）
   // 整体计算还是采用扇区数量进行计算好了，每当调用create_write_sector递减本次分配的扇区数量
   // 再调用indirect_block_resize为各间接块分配直接块
@@ -1063,47 +1071,64 @@ static bool enlarge_inode(struct inode *inode, off_t size, off_t offset) {
     return false;
   }
 
-  block_sector_t prev_sector_cnt = bytes_to_sectors(inode->length);
+  bool success = false;
+  block_sector_t prev_sector_cnt = bytes_to_sectors(inode_disk->length);
   block_sector_t except_sector_cnt = bytes_to_sectors(size + offset);
-  meta_t *meta = search_sector(inode->sector, true);
-  struct inode_disk *inode_disk = (struct inode_disk *)meta->block;
-  lock_acquire(&meta->block_lock);
 
   /*
     下列注释中的[]指的是Inode中的指针区域：
     [ Inode中直接块指针区域 ]：[0, INODE_DIRECT_COUNT)
-    [ Inode中间接块指针区域 ]：[INODE_DIRECT_COUNT, INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE)
-    [ 二级间接块中的间接指针区域 ]：[INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE, MAX_FILE_LENGTH /
-  BLOCK_SECTOR_SIZE)
+    [ Inode中间接块指针区域 ]：[INODE_DIRECT_COUNT, INODE_INDIRECT_SECTOR_COUNT)
+    [ 二级间接块中的间接指针区域 ]：
+      [INODE_INDIRECT_SECTOR_COUNT, MAX_FILE_LENGTH / BLOCK_SECTOR_SIZE)
   */
+  block_sector_t idr_prev_sector_cnt = idr_prev_sector_cnt;
+  block_sector_t idr_except_sector_cnt = idr_except_sector_cnt;
   if (prev_sector_cnt <= INODE_DIRECT_COUNT) {
     /* Case 1: [ EOF, New EOF] [ ] [ ] */
     if (except_sector_cnt <= INODE_DIRECT_COUNT) {
-      alloc_direct_portion(inode_disk->dr_arr, prev_sector_cnt, except_sector_cnt);
+      success = resize_direct_ptr_portion(inode_disk->dr_arr, INODE_DIRECT_COUNT, except_sector_cnt, false);
     }
     /* Case 2: [ EOF ] [ New EOF ] [ ] */
-    else if (except_sector_cnt <= INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE) {
-      alloc_direct_portion(inode_disk->dr_arr, prev_sector_cnt, INODE_DIRECT_COUNT);
-      alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, prev_sector_cnt - INODE_DIRECT_COUNT, except_sector_cnt - INODE_DIRECT_COUNT);
+    else if (except_sector_cnt <= INODE_INDIRECT_SECTOR_COUNT) {
+      success = resize_direct_ptr_portion(inode_disk->dr_arr, INODE_DIRECT_COUNT, INODE_DIRECT_COUNT, false);
+      if (!success) {
+        resize_direct_ptr_portion(inode_disk->dr_arr, INODE_DIRECT_COUNT, prev_sector_cnt, false);
+        goto done;
+      }
+      success = alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, idr_prev_sector_cnt,
+                                       idr_except_sector_cnt, false, NULL);
     }
     /* Case 3: [ EOF ] [ ] [ New EOF ] */
     else {
+      success = resize_direct_ptr_portion(inode_disk->dr_arr, INODE_DIRECT_COUNT, INODE_DIRECT_COUNT, false);
+      if (!success) {
+        resize_direct_ptr_portion(inode_disk->dr_arr, INODE_DIRECT_COUNT, prev_sector_cnt, true);
+        goto done;
+      }
+      success = alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, idr_prev_sector_cnt,
+                                       idr_except_sector_cnt, true, &inode_disk->dbi_arr);
     }
 
-  } else if (prev_sector_cnt <= INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE) {
+  } else if (prev_sector_cnt <= INODE_INDIRECT_SECTOR_COUNT) {
     /* Case 4: [ ] [ EOF, New EOF ] [  ] */
-    if (prev_sector_cnt <= INODE_INDIRECT_COUNT * BLOCK_SECTOR_SIZE) {
-
+    if (prev_sector_cnt <= INODE_INDIRECT_SECTOR_COUNT) {
+      success = alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, idr_prev_sector_cnt,
+                                       idr_except_sector_cnt, false, NULL);
     }
-    /* Case 5: [ ] [ EOF ] [  New EOF ] */
+    /* Case 5: [ ] [ EOF ] [ New EOF ] */
     else {
+      success = alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, idr_prev_sector_cnt,
+                                       idr_except_sector_cnt, true, &inode_disk->dbi_arr);
     }
   }
   /* Case 6: [ ] [ ] [ EOF, New EOF ] */
   else {
+    block_sector_t db_prev_sector_cnt = idr_prev_sector_cnt - INODE_INDIRECT_SECTOR_COUNT;
+    block_sector_t db_except_sector_cnt = idr_except_sector_cnt - INODE_INDIRECT_SECTOR_COUNT;
+    success = alloc_indirect_portion(inode_disk->idr_arr, INODE_DB_INDIRECT_COUNT, db_prev_sector_cnt,
+                                     db_except_sector_cnt, false, NULL);
   }
-  lock_release(&meta->block_lock);
-  lock_acquire(&meta->meta_lock);
-  meta->worker_cnt--;
-  lock_release(&meta->meta_lock);
+done:
+  return success;
 }
