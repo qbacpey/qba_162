@@ -32,12 +32,14 @@
 #define INODE_DIRECT_COUNT 64
 /* Inode直属间接块指针的数目 */
 #define INODE_INDIRECT_COUNT 48
-/* Inode直属间接块部分可表示的扇区数目 */
-#define INODE_INDIRECT_SECTOR_COUNT INODE_INDIRECT_COUNT *BLOCK_SECTOR_SIZE
-/* Inode直属直接块与直属间接块部分可表示的扇区数目 */
-#define INODE_DIRECT_INDIRECT_SECTOR_COUNT INODE_DIRECT_COUNT + INODE_INDIRECT_SECTOR_COUNT
 /* Inode直属二级间接块指针的数目 */
 #define INODE_DB_INDIRECT_COUNT 1
+
+/* Inode直属间接块部分可表示的扇区数目 */
+#define INODE_INDIRECT_SECTOR_COUNT (INODE_INDIRECT_COUNT * POINTER_IN_SECTOR)
+/* Inode直属直接块与直属间接块部分可表示的扇区数目，记得加括号 */
+#define INODE_DIRECT_INDIRECT_SECTOR_COUNT (INODE_DIRECT_COUNT + INODE_INDIRECT_SECTOR_COUNT)
+
 /* 间接块可容纳的指针数量 */
 #define INDIRECT_BLOCK_PTR_COUNT 128
 /* 二级间接块可容纳的指针数量 */
@@ -1022,16 +1024,9 @@ static bool alloc_indirect_portion(block_sector_t *idr_block_arr, block_sector_t
     if (*db_block == 0) {
       goto done;
     }
-
-    // 腾出一个meta
-    lock_acquire(&queue_lock);
-    meta_t *meta = NULL;
-    meta = evict_meta_top_half();
-    lock_release(&queue_lock);
-    evict_meta_bottom_half(meta, *db_block, false);
-
-    safe_sector_write(meta, {
-      success = alloc_indirect_portion((block_sector_t *)meta->block, INODE_DB_INDIRECT_COUNT, 0,
+    meta_t *db_block_meta = search_sector_head(*db_block, true);
+    safe_sector_write(db_block_meta, {
+      success = alloc_indirect_portion((block_sector_t *)db_block_meta->block, DB_INDIRECT_BLOCK_PTR_COUNT, 0,
                                        except_sector_cnt, false, NULL);
     });
     if (!success) {
@@ -1049,7 +1044,7 @@ done:
       idr_block_t *indirect_block = (idr_block_t *)meta->block;
       // 由于需要保留EOF原来所在的扇区，因此可以直接使用（in_block_alloced_sec_cnt可作为原EOF的尾后下标）
       safe_sector_write(meta, {
-        resize_direct_ptr_portion(indirect_block->arr, INDIRECT_BLOCK_PTR_COUNT, in_block_alloced_sec_cnt,
+        resize_direct_ptr_portion(indirect_block->arr, INODE_INDIRECT_COUNT, in_block_alloced_sec_cnt,
                                   false);
       });
     }
@@ -1116,7 +1111,7 @@ static bool enlarge_inode(struct inode_disk *inode_disk, off_t size, off_t offse
   bool success = false;
 
   // 如果EOF位于扇区的中段，检查能否直接通过移动EOF实现扩大文件
-  if(bytes_to_sectors(inode_disk->length) == bytes_to_sectors(size + offset)){
+  if (bytes_to_sectors(inode_disk->length) == bytes_to_sectors(size + offset)) {
     success = true;
     goto done;
   }
@@ -1160,7 +1155,8 @@ static bool enlarge_inode(struct inode_disk *inode_disk, off_t size, off_t offse
         goto done;
       }
       success = alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, idr_prev_sector_cnt,
-                                       idr_except_sector_cnt, true, &inode_disk->dbi_arr);
+                                       idr_except_sector_cnt, true, &inode_disk->dbi_arr) &&
+                inode_disk->dbi_arr != 0;
     }
 
   } else if (prev_sector_cnt <= INODE_DIRECT_INDIRECT_SECTOR_COUNT) {
@@ -1172,19 +1168,24 @@ static bool enlarge_inode(struct inode_disk *inode_disk, off_t size, off_t offse
     /* Case 5: [ ] [ EOF ] [ New EOF ] */
     else {
       success = alloc_indirect_portion(inode_disk->idr_arr, INODE_INDIRECT_COUNT, idr_prev_sector_cnt,
-                                       idr_except_sector_cnt, true, &inode_disk->dbi_arr);
+                                       idr_except_sector_cnt, true, &inode_disk->dbi_arr) &&
+                inode_disk->dbi_arr != 0;
     }
   }
   /* Case 6: [ ] [ ] [ EOF, New EOF ] */
   else {
+    ASSERT(inode_disk->dbi_arr != 0);
     block_sector_t db_prev_sector_cnt = idr_prev_sector_cnt > INODE_INDIRECT_SECTOR_COUNT
                                             ? idr_prev_sector_cnt - INODE_INDIRECT_SECTOR_COUNT
                                             : 0;
     block_sector_t db_except_sector_cnt = idr_except_sector_cnt > INODE_INDIRECT_SECTOR_COUNT
                                               ? idr_except_sector_cnt - INODE_INDIRECT_SECTOR_COUNT
                                               : 0;
-    success = alloc_indirect_portion(inode_disk->idr_arr, INODE_DB_INDIRECT_COUNT, db_prev_sector_cnt,
-                                     db_except_sector_cnt, false, NULL);
+    meta_t *db_block_meta = search_sector_head(inode_disk->dbi_arr, true);
+    safe_sector_write(db_block_meta, {
+      success = alloc_indirect_portion((block_sector_t *)db_block_meta->block, DB_INDIRECT_BLOCK_PTR_COUNT,
+                                       db_prev_sector_cnt, db_except_sector_cnt, false, NULL);
+    });
   }
 done:
   if (success)
