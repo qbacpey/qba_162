@@ -282,9 +282,7 @@ static int syscall_close(uint32_t *args, struct process *pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-
       file_close(pos->file);
-
       result = 0;
       list_remove(&(pos->elem));
       free(pos);
@@ -381,9 +379,7 @@ static int syscall_read(uint32_t *args, struct process *pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-
       off = file_read(pos->file, (void *)args[2], args[3]);
-
       break;
     }
   }

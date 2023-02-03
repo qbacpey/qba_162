@@ -410,7 +410,6 @@ void inode_remove(struct inode *inode) {
 off_t inode_read_at(struct inode *inode, void *buffer_, off_t size, off_t offset) {
   uint8_t *buffer = buffer_;
   off_t bytes_read = 0;
-  uint8_t *bounce = NULL;
 
   while (size > 0) {
     /* Disk sector to read, starting byte offset within sector. */
@@ -436,13 +435,8 @@ off_t inode_read_at(struct inode *inode, void *buffer_, off_t size, off_t offset
     } else {
       /* Read sector into bounce buffer, then partially copy
              into caller's buffer. */
-      if (bounce == NULL) {
-        bounce = malloc(BLOCK_SECTOR_SIZE);
-        if (bounce == NULL)
-          break;
-      }
-      read_from_sector(sector_idx, bounce);
-      memcpy(buffer + bytes_read, bounce + sector_ofs, chunk_size);
+      meta_t *meta = search_sector_head(sector_idx, true);
+      safe_sector_read(meta, { memcpy(buffer + bytes_read, (void *)meta->block + sector_ofs, chunk_size); });
     }
 
     /* Advance. */
@@ -450,8 +444,6 @@ off_t inode_read_at(struct inode *inode, void *buffer_, off_t size, off_t offset
     offset += chunk_size;
     bytes_read += chunk_size;
   }
-  free(bounce);
-
   return bytes_read;
 }
 
@@ -465,7 +457,6 @@ off_t inode_read_at(struct inode *inode, void *buffer_, off_t size, off_t offset
 off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t offset) {
   const uint8_t *buffer = buffer_;
   off_t bytes_written = 0;
-  uint8_t *bounce = NULL;
 
   // 防止多个线程同时对正在执行文件延长的Inode做出修改
   lock_acquire(&inode->lock);
@@ -509,31 +500,22 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
       /* Write full sector directly to disk. */
       write_to_sector(sector_idx, buffer + bytes_written);
     } else {
-      /* We need a bounce buffer. */
-      if (bounce == NULL) {
-        bounce = malloc(BLOCK_SECTOR_SIZE);
-        if (bounce == NULL)
-          break;
-      }
-      //  TODO 删掉`bounce`
       /* If the sector contains data before or after the chunk
              we're writing, then we need to read in the sector
              first.  Otherwise we start with a sector of all zeros. */
+      meta_t *meta = NULL;
       if (sector_ofs > 0 || chunk_size < sector_left)
-        read_from_sector(sector_idx, bounce);
+        meta = search_sector_head(sector_idx, true);
       else
-        memset(bounce, 0, BLOCK_SECTOR_SIZE);
-      memcpy(bounce + sector_ofs, buffer + bytes_written, chunk_size);
-      write_to_sector(sector_idx, bounce);
+        meta = search_sector_head(sector_idx, false);
+      safe_sector_write(meta,
+                        { memcpy((void *)meta->block + sector_ofs, buffer + bytes_written, chunk_size); });
     }
 
     /* Advance. */
     size -= chunk_size;
     offset += chunk_size;
     bytes_written += chunk_size;
-  }
-  if (bounce != NULL) {
-    free(bounce);
   }
   return bytes_written;
 }
@@ -1044,8 +1026,7 @@ done:
       idr_block_t *indirect_block = (idr_block_t *)meta->block;
       // 由于需要保留EOF原来所在的扇区，因此可以直接使用（in_block_alloced_sec_cnt可作为原EOF的尾后下标）
       safe_sector_write(meta, {
-        resize_direct_ptr_portion(indirect_block->arr, INODE_INDIRECT_COUNT, in_block_alloced_sec_cnt,
-                                  false);
+        resize_direct_ptr_portion(indirect_block->arr, INODE_INDIRECT_COUNT, in_block_alloced_sec_cnt, false);
       });
     }
   }
