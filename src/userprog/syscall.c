@@ -7,6 +7,7 @@
 #include "threads/interrupt.h"
 #include "threads/malloc.h"
 #include "threads/thread.h"
+#include "userprog/file_desc.h"
 #include "userprog/process.h"
 #include <stdio.h>
 #include <syscall-nr.h>
@@ -23,9 +24,16 @@ static int syscall_open(uint32_t *args, struct process *pcb);
 static int syscall_write(uint32_t *args, struct process *pcb);
 static int syscall_filesize(uint32_t *args, struct process *pcb);
 static int syscall_read(uint32_t *args, struct process *pcb);
-static int syscall_seek(uint32_t *args, struct process *pcb);
-static int syscall_close(uint32_t *args, struct process *pcb);
+static bool syscall_seek(uint32_t *args, struct process *pcb);
+static bool syscall_close(uint32_t *args, struct process *pcb);
 static int syscall_tell(uint32_t *args, struct process *pcb);
+
+static bool syscall_chdir(const char *dir, struct process *);
+static bool syscall_mkdir(const char *dir, struct process *);
+static bool syscall_readdir(uint32_t fd, char *name, struct process *);
+static bool syscall_isdir(uint32_t fd, struct process *);
+static int syscall_inumber(uint32_t fd, struct process *);
+
 static double syscall_compute_e(uint32_t *args, struct process *pcb);
 static inline bool check_fd(uint32_t, struct process *); /* fd系统调用检查，仅检查是否大于下一个文件标识符 */
 static inline bool check_buffer(void *, uint32_t); /* 三参数系统调用检查 */
@@ -228,6 +236,15 @@ static pid_t syscall_exec(uint32_t *args, struct process *pcb) {
 
 static int syscall_wait(uint32_t *args, struct process *pcb) { return process_wait(args[1]); }
 
+/**
+ * @brief 创建名为`args[1]`、初始大小为`initial_size`普通文件
+ *
+ * @param args[1] 文件路径，既可以是绝对路径，也可以是相对路径
+ * @param initial_size
+ * @param pcb
+ * @return true
+ * @return false
+ */
 static bool syscall_create(uint32_t *args, struct process *pcb) {
   bool result = false;
 
@@ -236,130 +253,102 @@ static bool syscall_create(uint32_t *args, struct process *pcb) {
   return result;
 }
 
+/**
+ * @brief 移除名为`args[1]`的文件
+ *
+ * @param args[1] 文件路径，既可以是绝对路径，也可以是相对路径
+ * @param pcb
+ * @return true
+ * @return false
+ */
 static bool syscall_remove(uint32_t *args, struct process *pcb) {
-  bool result = false;
-
-  result = filesys_remove((char *)args[1]);
-
-  return result;
+  return file_desc_remove((const char *)args[1], pcb);
 }
 
+/**
+ * @brief 打开名为`args[1]`的文件，将其加载到进程文件打开表中，返回其文件描述符
+ *
+ * @param args[1] 文件路径，既可以是绝对路径，也可以是相对路径
+ * @param pcb
+ * @return uint32_t 文件描述符，失败时返回-1
+ */
 static int syscall_open(uint32_t *args, struct process *pcb) {
-  struct list *files_tab = &(pcb->files_tab);
-  struct lock *files_tab_lock = &(pcb->files_lock);
-  struct file *new_file = NULL;
-  int result = -1;
-
-  // printf("%s: open file%s\n", pcb->process_name, (char*)args[1]);
-
-  new_file = filesys_open((char *)args[1]);
-
-  if (new_file != NULL) {
-    ASSERT(pcb->files_next_desc >= 3);
-
-    struct file_desc *new_file_desc = malloc(sizeof(struct file_desc));
-    new_file_desc->file = new_file;
-    lock_acquire(files_tab_lock);
-    new_file_desc->file_desc = pcb->files_next_desc;
-    list_push_front(files_tab, &(new_file_desc->elem));
-    pcb->files_next_desc++;
-    lock_release(files_tab_lock);
-    
-    result = new_file_desc->file_desc;
-  }
-  return result;
+  return file_desc_open((const char *)args[1], pcb);
 }
 
-static int syscall_close(uint32_t *args, struct process *pcb) {
+/**
+ * @brief 关闭`pcb`文件打开表中文件描述符为`args[1]`的文件
+ *
+ * @param args[1] fd 文件描述符
+ * @param pcb
+ * @return true
+ * @return false
+ */
+static bool syscall_close(uint32_t *args, struct process *pcb) {
   uint32_t fd = args[1];
-  int result = -1;
   if (fd < 3) {
-    return result;
+    return false;
   }
-  struct list *files_tab = &(pcb->files_tab);
-  struct lock *files_tab_lock = &(pcb->files_lock);
-  struct file_desc *pos = NULL;
-  lock_acquire(files_tab_lock);
-  list_for_each_entry(pos, files_tab, elem) {
-    if (pos->file_desc == fd) {
-      file_close(pos->file);
-      result = 0;
-      list_remove(&(pos->elem));
-      free(pos);
-      break;
-    }
-  }
-  lock_release(files_tab_lock);
-  return result;
+  return file_desc_close(fd, pcb);
 }
 
+/**
+ * @brief 获取`fd`的大小
+ *
+ * @param fd
+ * @param pcb
+ * @return int 文件大小，如果不是普通文件返回-1
+ */
 static int syscall_filesize(uint32_t *args, struct process *pcb) {
   uint32_t fd = args[1];
-  int size = -1;
   if (fd < 3) {
-    return size;
+    return -1;
   }
-  struct list *files_tab = &(pcb->files_tab);
-  struct lock *files_tab_lock = &(pcb->files_lock);
-  struct file_desc *pos = NULL;
 
-  lock_acquire(files_tab_lock);
-  list_for_each_entry(pos, files_tab, elem) {
-    if (pos->file_desc == fd) {
-      size = (int)file_length(pos->file);
-      break;
-    }
-  }
-  lock_release(files_tab_lock);
-
-  return size;
+  return file_desc_size(fd, pcb);
 }
 
+/**
+ * @brief Returns the position of the next byte to be read or written in open ﬁle fd, expressed in bytes from
+ * the beginning of the ﬁle.
+ *
+ * @param fd
+ * @param pcb
+ * @return int 如果不是普通文件返回-1
+ */
 static int syscall_tell(uint32_t *args, struct process *pcb) {
   uint32_t fd = args[1];
-  int size = -1;
   if (fd < 3) {
-    return size;
+    return -1;
   }
-  struct list *files_tab = &(pcb->files_tab);
-  struct lock *files_tab_lock = &(pcb->files_lock);
-  struct file_desc *pos = NULL;
-
-  lock_acquire(files_tab_lock);
-  list_for_each_entry(pos, files_tab, elem) {
-    if (pos->file_desc == fd) {
-      size = (int)file_tell(pos->file);
-      break;
-    }
-  }
-  lock_release(files_tab_lock);
-
-  return size;
+  return file_desc_tell(fd, pcb);
 }
 
-static int syscall_seek(uint32_t *args, struct process *pcb) {
+/**
+ * @brief Changes the next byte to be read or written in open ﬁle fd to position, expressed in bytes from the
+ * beginning of the ﬁle. Thus, a position of 0 is the ﬁle’s start.
+ *
+ * @param fd
+ * @param pcb
+ * @return int 如果不是普通文件返回-1
+ */
+static bool syscall_seek(uint32_t *args, struct process *pcb) {
   uint32_t fd = args[1];
-  int result = -1;
+  unsigned pos = args[2];
   if (fd < 3) {
-    return result;
+    return -1;
   }
-  struct list *files_tab = &(pcb->files_tab);
-  struct lock *files_tab_lock = &(pcb->files_lock);
-  struct file_desc *pos = NULL;
 
-  lock_acquire(files_tab_lock);
-  list_for_each_entry(pos, files_tab, elem) {
-    if (pos->file_desc == fd) {
-      file_seek(pos->file, args[2]);
-      result = 0;
-      break;
-    }
-  }
-  lock_release(files_tab_lock);
-
-  return result;
+  return file_desc_seek(fd, pos, pcb);
 }
 
+/**
+ * @brief 读取`pcb`文件打开表中的普通文件`fd`
+ *
+ * @param fd
+ * @param pcb
+ * @return int 实际读取到的Byte数目，如果不是普通文件返回-1
+ */
 static int syscall_read(uint32_t *args, struct process *pcb) {
   if (args[1] == 0) {
     for (uint32_t i = 0; i < (uint32_t)args[3]; i++) {
@@ -371,22 +360,18 @@ static int syscall_read(uint32_t *args, struct process *pcb) {
   }
 
   uint32_t fd = args[1];
-  uint32_t off = -1;
-  struct list *files_tab = &(pcb->files_tab);
-  struct lock *files_tab_lock = &(pcb->files_lock);
-  struct file_desc *pos = NULL;
-
-  lock_acquire(files_tab_lock);
-  list_for_each_entry(pos, files_tab, elem) {
-    if (pos->file_desc == fd) {
-      off = file_read(pos->file, (void *)args[2], args[3]);
-      break;
-    }
-  }
-  lock_release(files_tab_lock);
-  return off;
+  void *buffer = (void *)args[2];
+  unsigned size = args[3];
+  return file_desc_read(fd, buffer, size, pcb);
 }
 
+/**
+ * @brief 写入`pcb`文件打开表中的普通文件`fd`
+ *
+ * @param fd
+ * @param pcb
+ * @return int 实际写入到的Byte数目，如果不是普通文件返回-1
+ */
 static int syscall_write(uint32_t *args, struct process *pcb) {
   if (args[1] == 1) {
     putbuf((char *)args[2], (size_t)args[3]);
@@ -396,21 +381,64 @@ static int syscall_write(uint32_t *args, struct process *pcb) {
   }
 
   uint32_t fd = args[1];
-  uint32_t off = -1;
-  struct list *files_tab = &(pcb->files_tab);
-  struct lock *files_tab_lock = &(pcb->files_lock);
-  struct file_desc *pos = NULL;
+  void *buffer = (void *)args[2];
+  unsigned size = args[3];
 
-  lock_acquire(files_tab_lock);
-  list_for_each_entry(pos, files_tab, elem) {
-    if (pos->file_desc == fd) {
-      off = file_write(pos->file, (void *)args[2], args[3]);
-      break;
-    }
-  }
-  lock_release(files_tab_lock);
-  return off;
+  return file_desc_write(fd, buffer, size, pcb);
 }
+
+/* 文件描述符表操作接口 */
+
+/**
+ * @brief 将`pcb`工作目录修改为`dir`，将其添加到进程文件打开表的同时关闭旧的文件打开表
+ *
+ * @param dir 目录路径，既可以是绝对路径，也可以是相对路径
+ * @param pcb
+ * @return true
+ * @return false
+ */
+static bool syscall_chdir(const char *dir, struct process *pcb) { return false; }
+
+/**
+ * @brief 创建名为`dir`的目录文件，既可以在`pcb`工作目录中创建，也可以在其他位置创建
+ *
+ * @param dir 目录路径，既可以是绝对路径，也可以是相对路径
+ * @param pcb
+ * @return true
+ * @return false
+ */
+static bool syscall_mkdir(const char *dir, struct process *pcb) { return false; }
+
+/**
+ * @brief 读取`fd`目录中的下一个目录表项，将文件名称保存到`name`中
+ *
+ * @param fd 文件描述符，必须是目录文件
+ * @param name
+ * @param pcb
+ * @return true
+ * @return false
+ */
+static bool syscall_readdir(uint32_t fd, char *name, struct process *pcb) { return false; }
+
+/**
+ * @brief Returns true if fd represents a directory, false if it represents an ordinary ﬁle.
+ *
+ * @param fd
+ * @param pcb
+ * @return true
+ * @return false
+ */
+static bool syscall_isdir(uint32_t fd, struct process *pcb) { return false; }
+
+/**
+ * @brief Returns the inode number of the inode associated with fd,
+ * which may represent an ordinary ﬁle or a directory.
+ *
+ * @param fd
+ * @param pcb
+ * @return int
+ */
+static int syscall_inumber(uint32_t fd, struct process *pcb) { return -1; }
 
 static inline bool check_fd(uint32_t fd, struct process *pcb) { return pcb->files_next_desc >= fd; }
 static inline bool check_buffer(void *buffer, uint32_t size) {

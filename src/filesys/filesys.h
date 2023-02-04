@@ -4,6 +4,12 @@
 #include <stdbool.h>
 #include "filesys/off_t.h"
 
+/**
+ * @brief 用于表示struct file_in_desc中文件的类型为普通文件还是目录文件
+ *
+ */
+enum file_type { FILE, DIR };
+
 /* Sectors of system file inodes. */
 #define FREE_MAP_SECTOR 0 /* Free map file inode sector. */
 #define ROOT_DIR_SECTOR 1 /* Root directory file inode sector. */

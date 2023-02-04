@@ -12,6 +12,7 @@
 #include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "file_desc.h"
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
@@ -209,25 +210,25 @@ static void start_process(void* init_pcb_) {
   // does not try to activate our uninitialized pagedir
   new_pcb->pagedir = NULL;
   t->pcb = new_pcb;
-  t->pcb->parent = init_pcb->parent;
+  new_pcb->parent = init_pcb->parent;
 
   // 初始化文件描述符表
-  list_init(&(t->pcb->files_tab));
-  lock_init(&t->pcb->files_lock);
-  t->pcb->files_next_desc = 3;
+  list_init(&(new_pcb->files_tab));
+  lock_init(&new_pcb->files_lock);
+  new_pcb->files_next_desc = 3;
 
   // 初始化子进程表
-  t->pcb->self = self;
-  list_init(&(t->pcb->children));
-  t->pcb->editing = editing;
-  lock_init(&(t->pcb->children_lock));
+  new_pcb->self = self;
+  list_init(&(new_pcb->children));
+  new_pcb->editing = editing;
+  lock_init(&(new_pcb->children_lock));
 
   // 初始化线程表
-  // list_init ( &(t->pcb->threads) );
+  // list_init ( &(new_pcb->threads) );
 
   // Continue initializing the PCB as normal
-  t->pcb->main_thread = t;
-  strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+  new_pcb->main_thread = t;
+  strlcpy(new_pcb->process_name, t->name, sizeof t->name);
 
   /* Initialize interrupt frame and load executable. */
 
@@ -243,7 +244,7 @@ static void start_process(void* init_pcb_) {
     // Avoid race where PCB is freed before t->pcb is set to NULL
     // If this happens, then an unfortuantely timed timer interrupt
     // can try to activate the pagedir, but it is now freed memory
-    struct process* pcb_to_free = t->pcb;
+    struct process* pcb_to_free = new_pcb;
     t->pcb = NULL;
     free(pcb_to_free);
     free_parent_self(self, -1);
@@ -527,17 +528,8 @@ void process_exit(int exit_code) {
 
   file_close(pcb_to_free->exec);
 
-  /* 释放文件描述符表，必须使用 NULL 进行初始化 */
-  struct file_desc* file_pos = NULL;
-  list_clean_each(file_pos, &(pcb_to_free->files_tab), elem) {
-    file_close(file_pos->file);
-    free(file_pos);
-  }
-  // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
-  if (file_pos != NULL) {
-    file_close(file_pos->file);
-    free(file_pos);
-  }
+  /* 释放文件描述符表 */
+  file_desc_destroy(pcb_to_free);
 
   /* 释放子进程表 */
   struct child_process* child = NULL;
