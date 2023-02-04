@@ -248,6 +248,7 @@ static int syscall_open(uint32_t *args, struct process *pcb) {
   struct list *files_tab = &(pcb->files_tab);
   struct lock *files_tab_lock = &(pcb->files_lock);
   struct file *new_file = NULL;
+  int result = -1;
 
   // printf("%s: open file%s\n", pcb->process_name, (char*)args[1]);
 
@@ -255,19 +256,18 @@ static int syscall_open(uint32_t *args, struct process *pcb) {
 
   if (new_file != NULL) {
     ASSERT(pcb->files_next_desc >= 3);
+
     struct file_desc *new_file_desc = malloc(sizeof(struct file_desc));
     new_file_desc->file = new_file;
-
     lock_acquire(files_tab_lock);
     new_file_desc->file_desc = pcb->files_next_desc;
     list_push_front(files_tab, &(new_file_desc->elem));
     pcb->files_next_desc++;
     lock_release(files_tab_lock);
-
-    return new_file_desc->file_desc;
-  } else {
-    return -1;
+    
+    result = new_file_desc->file_desc;
   }
+  return result;
 }
 
 static int syscall_close(uint32_t *args, struct process *pcb) {
@@ -404,9 +404,7 @@ static int syscall_write(uint32_t *args, struct process *pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-
       off = file_write(pos->file, (void *)args[2], args[3]);
-
       break;
     }
   }

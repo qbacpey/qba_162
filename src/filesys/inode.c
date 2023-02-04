@@ -357,6 +357,7 @@ void inode_close(struct inode *inode) {
   if (--inode->open_cnt == 0) {
     /* Remove from inode list and release lock. */
     list_remove(&inode->elem);
+    // 只需释放inode列表锁
     lock_release(&inodes_lock);
     /* Deallocate blocks if removed. */
     if (inode->removed) {

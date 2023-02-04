@@ -24,19 +24,6 @@ typedef tid_t pid_t;
 typedef void (*pthread_fun)(void*);
 typedef void (*stub_fun)(pthread_fun, void*);
 
-/* 文件描述符表元素 
- * 
- * 开启即创建，关闭即释放
- * 创建的时候使用files_next_desc作为本文件的文件描述符
- * 随后将这个值进行递增处理
- * 
- */
-struct file_desc {
-  uint32_t file_desc; /* 文件描述符，从3开始 */
-  struct file* file;  /* 文件指针，务必注意释放问题 */
-  struct list_elem elem;
-};
-
 /* 子进程表元素 
  * 
  * 确保获锁顺序为：editing->waiting

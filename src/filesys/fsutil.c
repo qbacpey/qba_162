@@ -1,19 +1,19 @@
 #include "filesys/fsutil.h"
-#include <debug.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ustar.h>
 #include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/vaddr.h"
+#include <debug.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ustar.h>
 
 /* List files in the root directory. */
-void fsutil_ls(char** argv UNUSED) {
-  struct dir* dir;
+void fsutil_ls(char **argv UNUSED) {
+  struct dir *dir;
   char name[NAME_MAX + 1];
 
   printf("Files in the root directory:\n");
@@ -28,11 +28,11 @@ void fsutil_ls(char** argv UNUSED) {
 
 /* Prints the contents of file ARGV[1] to the system console as
    hex and ASCII. */
-void fsutil_cat(char** argv) {
-  const char* file_name = argv[1];
+void fsutil_cat(char **argv) {
+  const char *file_name = argv[1];
 
-  struct file* file;
-  char* buffer;
+  struct file *file;
+  char *buffer;
 
   printf("Printing '%s' to the console...\n", file_name);
   file = filesys_open(file_name);
@@ -52,8 +52,8 @@ void fsutil_cat(char** argv) {
 }
 
 /* Deletes file ARGV[1]. */
-void fsutil_rm(char** argv) {
-  const char* file_name = argv[1];
+void fsutil_rm(char **argv) {
+  const char *file_name = argv[1];
 
   printf("Deleting '%s'...\n", file_name);
   if (!filesys_remove(file_name))
@@ -61,11 +61,22 @@ void fsutil_rm(char** argv) {
 }
 
 /* Extracts a ustar-format tar archive from the scratch block
-   device into the Pintos file system. */
-void fsutil_extract(char** argv UNUSED) {
+   device into the Pintos file system.
+
+   会直接忽略归档文件中目录文件，因此只会从归档文件中读取普通文件并写入到Pintos的文件系统中，
+   也就是说，读取到的所有文件都会被放置在根目录中。
+
+   尽管如此，这套组件实际还是能够完好地保留Pintos的目录结构完好地保留下来的，问题的关键就在于将tar
+   实现为用户程序。Pintos运行的时候便可以运行此程序，将指定目录中的所有文件连带其目录结构
+   一并打包到某个单独的tar文件中，此时`fsutil_append`只需支持普通文件提取，能够将该tar文件提取出来即可。
+
+   往后只需在另一个Pintos系统中调用`untar`，即可展开之前保存在该`tar`文件中的目录以及文件。具体而言，
+   `fsutil_extract`也只需要提供单个文件的提取功能即可，不需支持目录提取
+ */
+void fsutil_extract(char **argv UNUSED) {
   static block_sector_t sector = 0;
 
-  struct block* src;
+  struct block *src;
   void *header, *data;
 
   /* Allocate buffers. */
@@ -83,8 +94,8 @@ void fsutil_extract(char** argv UNUSED) {
          "into file system...\n");
 
   for (;;) {
-    const char* file_name;
-    const char* error;
+    const char *file_name;
+    const char *error;
     enum ustar_type type;
     int size;
 
@@ -100,10 +111,10 @@ void fsutil_extract(char** argv UNUSED) {
     } else if (type == USTAR_DIRECTORY)
       printf("ignoring directory %s\n", file_name);
     else if (type == USTAR_REGULAR) {
-      struct file* dst;
+      struct file *dst;
 
       printf("Putting '%s' into the file system...\n", file_name);
-
+      
       /* Create destination file. */
       if (!filesys_create(file_name, size))
         PANIC("%s: create failed", file_name);
@@ -146,13 +157,13 @@ void fsutil_extract(char** argv UNUSED) {
    the device.  This position is independent of that used for
    fsutil_extract(), so `extract' should precede all
    `append's. */
-void fsutil_append(char** argv) {
+void fsutil_append(char **argv) {
   static block_sector_t sector = 0;
 
-  const char* file_name = argv[1];
-  void* buffer;
-  struct file* src;
-  struct block* dst;
+  const char *file_name = argv[1];
+  void *buffer;
+  struct file *src;
+  struct block *dst;
   off_t size;
 
   printf("Appending '%s' to ustar archive on scratch device...\n", file_name);
