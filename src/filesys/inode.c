@@ -60,10 +60,11 @@ static const uint8_t zeros[BLOCK_SECTOR_SIZE];
 struct inode_disk {
   off_t length;                                 /* File size in bytes. */
   unsigned magic;                               /* Magic number. */
+  enum file_type type;                          /* 文件类型 */
   block_sector_t dr_arr[INODE_DIRECT_COUNT];    /* 直接块的下标 */
   block_sector_t idr_arr[INODE_INDIRECT_COUNT]; /* 间接块的下标 */
   block_sector_t dbi_arr;                       /* 二级间接块的下标 */
-  uint32_t unused[126 - INODE_DIRECT_COUNT - INODE_INDIRECT_COUNT - INODE_DB_INDIRECT_COUNT]; /* Not used. */
+  uint32_t unused[125 - INODE_DIRECT_COUNT - INODE_INDIRECT_COUNT - INODE_DB_INDIRECT_COUNT]; /* Not used. */
 };
 
 /* 二级间接块 */
@@ -98,10 +99,11 @@ In-memory inode. */
 struct inode {
   struct list_elem elem; /* Element in inode list. 修改时需要获取Inode队列锁 */
   block_sector_t sector; /* Sector number of disk location. 由于只会在初始化时被写入，因此不需要同步措施 */
-  struct lock lock;   /* Inode的锁 */
-  int open_cnt;       /* Number of openers. */
-  bool removed;       /* True if deleted, false otherwise. */
-  int deny_write_cnt; /* 0: writes ok, >0: deny writes. */
+  enum file_type type; /* 文件类型，读取时无需锁 */
+  struct lock lock;    /* Inode的锁 */
+  int open_cnt;        /* Number of openers. */
+  bool removed;        /* True if deleted, false otherwise. */
+  int deny_write_cnt;  /* 0: writes ok, >0: deny writes. */
 };
 
 /* Cache Buffer各Block的元数据，用于维护SC队列 */
@@ -269,7 +271,7 @@ void inode_init(void) {
    device.
    Returns true if successful.
    Returns false if memory or disk allocation fails. */
-bool inode_create(block_sector_t sector, off_t length) {
+bool inode_create(block_sector_t sector, off_t length, enum file_type type) {
   struct inode_disk *disk_inode = NULL;
   bool success = false;
 
@@ -284,6 +286,7 @@ bool inode_create(block_sector_t sector, off_t length) {
     /* 所需使用的扇区个数 */
     disk_inode->length = 0;
     disk_inode->magic = INODE_MAGIC;
+    disk_inode->type = type;
     /* 在Free Map中分配指定数目的的扇区，开始位置保存为disk_inode->start */
     if (!enlarge_inode(disk_inode, 0, length)) {
       goto done;
@@ -320,6 +323,10 @@ struct inode *inode_open(block_sector_t sector) {
 
   /* Initialize. */
   list_push_front(&open_inodes, &inode->elem);
+  meta_t *inode_meta = search_sector_head(inode->sector, true);
+  safe_sector_read(inode_meta, {
+    inode->type = ((struct inode_disk *)inode_meta->block)->type;
+  });
   inode->sector = sector;
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
@@ -461,7 +468,7 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
 
   // 防止多个线程同时对正在执行文件延长的Inode做出修改
   lock_acquire(&inode->lock);
-  if (inode->deny_write_cnt) {
+  if (inode->deny_write_cnt || inode->removed) {
     lock_release(&inode->lock);
     return 0;
   }
@@ -473,6 +480,7 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
     safe_sector_write(inode_meta,
                       { success = enlarge_inode((struct inode_disk *)inode_meta->block, size, offset); });
     ASSERT(inode_length(inode) == size + offset);
+    inode_allow_write(inode);
     if (!success) {
       lock_release(&inode->lock);
       return 0;
@@ -568,6 +576,16 @@ off_t inode_length(const struct inode *inode) {
   size_t length = 0;
   safe_sector_read(meta, { length = ((struct inode_disk *)meta->block)->length; });
   return length;
+}
+
+/**
+ * @brief 获取`inode`类型
+ *
+ * @param inode
+ * @return enum file_type
+ */
+enum file_type inode_type(const struct inode *inode) {
+  return inode->type;
 }
 
 /**

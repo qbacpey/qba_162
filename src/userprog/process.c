@@ -1,18 +1,9 @@
 #include "userprog/process.h"
-#include <debug.h>
-#include <inttypes.h>
-#include <round.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "lib/string.h"
-#include "userprog/gdt.h"
-#include "userprog/pagedir.h"
-#include "userprog/tss.h"
+#include "file_desc.h"
 #include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
-#include "file_desc.h"
+#include "lib/string.h"
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
@@ -21,32 +12,42 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/gdt.h"
+#include "userprog/pagedir.h"
+#include "userprog/tss.h"
+#include <debug.h>
+#include <inttypes.h>
+#include <round.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 // static struct semaphore temporary; /* 现在才搞清楚原来这个temporary是用来和process_wait协作的 */
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static bool load(const char* file_name, void (**eip)(void), void** esp);
-bool setup_thread(void (**eip)(void), void** esp);
+static bool load(const char *file_name, void (**eip)(void), void **esp);
+bool setup_thread(void (**eip)(void), void **esp);
 
 /* 用于在父子用户进程之间传递参数的 */
 struct init_pcb {
-  struct process* parent;
-  struct child_process* self;
-  struct semaphore* editing;
-  char* cmd_line;
+  struct process *parent;
+  struct child_process *self;
+  struct semaphore *editing;
+  struct dir *working_dir; /* 父进程工作目录 */
+  char *cmd_line;
   bool processed; /* 是否处理过 cmd_line*/
 };
 
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
-   initialized here if main needs those members 
-   
+   initialized here if main needs those members
+
    简而言之，在这里执行主线程（进程）的初始化操作
    */
 void userprog_init(void) {
 
-  struct thread* t = thread_current();
+  struct thread *t = thread_current();
   bool success;
 
   /* Allocate process control block
@@ -60,7 +61,7 @@ void userprog_init(void) {
   ASSERT(success);
 
   /* 进程表相关的逻辑 */
-  struct process* pcb = t->pcb;
+  struct process *pcb = t->pcb;
   list_init(&(pcb->children));
 
   malloc_type(pcb->editing);
@@ -73,8 +74,11 @@ void userprog_init(void) {
   list_init(&(pcb->files_tab));
   lock_init(&(pcb->files_lock));
 
+  /* init进程的工作目录为根目录 */
+  pcb->working_dir = dir_open_root();
+
   /* 要让自己有一个进程表元素对应 */
-  struct child_process* fake_child_elem = NULL;
+  struct child_process *fake_child_elem = NULL;
   malloc_type(fake_child_elem);
   success = fake_child_elem != NULL;
   ASSERT(success);
@@ -92,20 +96,20 @@ void userprog_init(void) {
    before process_execute() returns.
   （这个说法实际上有点迷糊，它实际上指的是parent process 执行完 thread_create 之后，
    函数返回之前新线程有可能会被立即执行，
-   并不是指代新线程会在此函数执行的任意位置都有可能被执行）  
-   
+   并不是指代新线程会在此函数执行的任意位置都有可能被执行）
+
    Returns the new process's
-   process id, or TID_ERROR if the thread cannot be created. 
-   
+   process id, or TID_ERROR if the thread cannot be created.
+
    这是原版的函数原型：pid_t process_execute(const char* file_name)
 
    */
-pid_t process_execute(const char* file_name) {
-  char* fn_copy;
+pid_t process_execute(const char *file_name) {
+  char *fn_copy;
   tid_t tid;
-  struct process* pcb = thread_current()->pcb;
-  struct list* children = &(pcb->children);
-  struct lock* children_lock = &(pcb->children_lock);
+  struct process *pcb = thread_current()->pcb;
+  struct list *children = &(pcb->children);
+  struct lock *children_lock = &(pcb->children_lock);
 
   // 文件全局信号量？
   // sema_init(&temporary, 0);
@@ -117,7 +121,7 @@ pid_t process_execute(const char* file_name) {
 
   bool success = false;
   /* 向自己的进程表中加入新进程 */
-  struct child_process* child_elem = NULL;
+  struct child_process *child_elem = NULL;
   malloc_type(child_elem);
   success = child_elem != NULL;
   if (!success) {
@@ -140,7 +144,7 @@ pid_t process_execute(const char* file_name) {
   sema_init(child_elem->editing, 1);
 
   /* 初始化init_pcb（即start_process的参数） */
-  struct init_pcb* init_pcb_ = NULL;
+  struct init_pcb *init_pcb_ = NULL;
   malloc_type(init_pcb_);
   success = success && init_pcb_ != NULL;
   if (!success) {
@@ -153,6 +157,8 @@ pid_t process_execute(const char* file_name) {
   init_pcb_->self = child_elem;
   init_pcb_->parent = pcb;
   init_pcb_->cmd_line = fn_copy;
+  // 由父进程替子进程打开其工作目录
+  init_pcb_->working_dir = dir_reopen(pcb->working_dir);
 
   /* file_name的第一个空格设置为\0 拷贝系统调用参数到内核 */
   strlcpy(fn_copy, file_name, PGSIZE);
@@ -165,9 +171,9 @@ pid_t process_execute(const char* file_name) {
     init_pcb_->processed = false;
   }
 
-  /* Create a new thread to execute FILE_NAME. 
+  /* Create a new thread to execute FILE_NAME.
    *
-   * 从thread_create开始，child就有可能打断parent并开始执行 
+   * 从thread_create开始，child就有可能打断parent并开始执行
    * 为此，父进程的wait不仅需要等待waiting，
    * 还需要等待editing（当然child初始化PCB完成之后无论成功与否都需要释放editing）
    * 这主要是防止在child PCB未初始化完成时，父进程就访问其数据了
@@ -176,9 +182,6 @@ pid_t process_execute(const char* file_name) {
   sema_down(init_pcb_->editing);
   tid = thread_create(fn_copy, PRI_DEFAULT, start_process, init_pcb_);
   child_elem->pid = tid;
-
-
-
 done:
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
@@ -188,18 +191,18 @@ done:
 
 /* A thread function that loads a user process and starts it
    running. */
-static void start_process(void* init_pcb_) {
+static void start_process(void *init_pcb_) {
   /* 注意，此时的线程是child */
-  struct init_pcb* init_pcb = (struct init_pcb*)init_pcb_;
-  struct child_process* self = init_pcb->self;
-  struct semaphore* editing = init_pcb->editing;
-  char* file_name = init_pcb->cmd_line;
-  struct thread* t = thread_current();
+  struct init_pcb *init_pcb = (struct init_pcb *)init_pcb_;
+  struct child_process *self = init_pcb->self;
+  struct semaphore *editing = init_pcb->editing;
+  char *file_name = init_pcb->cmd_line;
+  struct thread *t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
 
   /* 分配PCB空间 */
-  struct process* new_pcb = malloc(sizeof(struct process));
+  struct process *new_pcb = malloc(sizeof(struct process));
   success = new_pcb != NULL;
   if (!success) {
     goto done;
@@ -223,8 +226,8 @@ static void start_process(void* init_pcb_) {
   new_pcb->editing = editing;
   lock_init(&(new_pcb->children_lock));
 
-  // 初始化线程表
-  // list_init ( &(new_pcb->threads) );
+  // 初始化工作目录（除init，所有进程的工作目录都是父进程替其打开的）
+  new_pcb->working_dir = init_pcb->working_dir;
 
   // Continue initializing the PCB as normal
   new_pcb->main_thread = t;
@@ -244,7 +247,7 @@ static void start_process(void* init_pcb_) {
     // Avoid race where PCB is freed before t->pcb is set to NULL
     // If this happens, then an unfortuantely timed timer interrupt
     // can try to activate the pagedir, but it is now freed memory
-    struct process* pcb_to_free = new_pcb;
+    struct process *pcb_to_free = new_pcb;
     t->pcb = NULL;
     free(pcb_to_free);
     free_parent_self(self, -1);
@@ -260,18 +263,18 @@ static void start_process(void* init_pcb_) {
    * 也就是Argc Argv那些玩意
    * 但是现在不知道这两个参数被放在了什么地方
    * 于是只能随便调节一下栈指针，应付一下对齐检查
-   * 
+   *
    * x86的要求是在将所有argument压入栈中之后
    * 栈对齐16位，也就是esp的末位应该是0
    * 调用call之后压入返回地址，esp的末位就应当变为c
    * 压入ebp之后，esp的末位就应当变为8（这也是%ebp实际所指向的地址）
    * 这也是为什么在callee中获取argument需要0x8(ebp)的原因
-   * 
+   *
    * 具体到这里，由于桩函数有两个参数，因此执行intr_exit之前
    * 地址应当变为 0x10 + 0x4 (没有调用call，自然不会将返回地址压栈)
-   * 
+   *
    * 最后，由于这里实现的是fake intr_frame 因此末尾对其的是 c 而不是 0
-   * 
+   *
    * if_.esp -= 0x14;
    * */
 
@@ -288,9 +291,9 @@ static void start_process(void* init_pcb_) {
   int raw_char_count = strlen(file_name) + 1;
   if_.esp -= (raw_char_count);
   strlcpy(if_.esp, file_name, raw_char_count);
-  char* token = if_.esp;
+  char *token = if_.esp;
   /* 对齐4byte */
-  if_.esp = (void*)((uint32_t)if_.esp & 0xfffffff0);
+  if_.esp = (void *)((uint32_t)if_.esp & 0xfffffff0);
 
   /* 已经算上了其他固定数量的参数 */
   int byte_counter = 0;
@@ -298,35 +301,34 @@ static void start_process(void* init_pcb_) {
   /* argc 一会再设置 */
   byte_counter += 4;
   if_.esp -= 4;
-  *(uint32_t*)if_.esp = 0;
+  *(uint32_t *)if_.esp = 0;
 
   /* argv 一会再设置 */
   byte_counter += 4;
   if_.esp -= 4;
-  *(uint32_t*)if_.esp = 0;
+  *(uint32_t *)if_.esp = 0;
 
   /* 使用strtok对fn_copy进行处理 */
 
-  char* save_ptr;
+  char *save_ptr;
   int argc = 0;
-  for (token = strtok_r(token, " ", &save_ptr); token != NULL;
-       token = strtok_r(NULL, " ", &save_ptr)) {
+  for (token = strtok_r(token, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)) {
     byte_counter += 4;
     if_.esp -= 4;
-    *(uint32_t*)if_.esp = token;
+    *(uint32_t *)if_.esp = token;
     argc++;
   }
   /* 确保最后一位是NULL */
   byte_counter += 4;
   if_.esp -= 4;
-  *(uint32_t*)if_.esp = 0;
+  *(uint32_t *)if_.esp = 0;
 
   /* 对齐 */
   if (byte_counter % 0x10 != 0) {
     byte_counter += 0x10;
     byte_counter &= 0xfffffff0;
   }
-  if_.esp = (void*)((uint32_t)if_.esp & 0xfffffff0);
+  if_.esp = (void *)((uint32_t)if_.esp & 0xfffffff0);
 
   /* 反转 有空再优化 注意单位 */
   uint32_t last_pos = byte_counter - 4;
@@ -338,9 +340,9 @@ static void start_process(void* init_pcb_) {
   }
 
   /* 设置 argv */
-  *((uint32_t*)if_.esp + 1) = (uint32_t*)if_.esp + 2;
+  *((uint32_t *)if_.esp + 1) = (uint32_t *)if_.esp + 2;
   /* 设置 argc */
-  *(uint32_t*)if_.esp = argc;
+  *(uint32_t *)if_.esp = argc;
 
   /* 伪装返回值 */
   if_.esp -= 0x4;
@@ -350,9 +352,9 @@ done:
   palloc_free_page(file_name);
   free(init_pcb);
   if (!success) {
-    // sema_up(&temporary);
     /* 如果是exited==false 但是exited_code=-1就说明PCB初始化错误 */
     self->exited = false;
+    dir_close(init_pcb->working_dir);
     sema_up(editing);
     thread_exit();
     NOT_REACHED();
@@ -367,61 +369,79 @@ done:
      threads/intr-stubs.S).  Because intr_exit takes all of its
      arguments on the stack in the form of a `struct intr_frame',
      we just point the stack pointer (%esp) to our stack frame
-     and jump to it. 
-  * 
+     and jump to it.
+  *
   * asm asm-qualifiers (AssemblerTemplate : OutputOperands : InputOperands : Clobbers)
   * 本质上来说，可以将这种指令当成是一系列能将输入参数转换输出参数的低级指令集合
-  * 
+  *
   * AssemblerTemplate: 汇编指令的模板，其中包含需要执行的汇编指令和令牌（即输入输出参数、goto参数）
-  * 
+  *
   * "%%"表示汇编器模板中的单个"%"
   * "%|""%{""%}"用于转义
-  * 
+  *
   * OuputOperands: 会被汇编指令修改的C变量列表，以逗号分隔
-  * 
+  *
   * 这是输出操作数的典型格式[ [asmSymbolicName] ] constraint (cvariablename)
   * asmSymbolicName是该C变量的符号化名字，可以在汇编代码中使用%[name]引用这个变量
   * 如果不使用asmSymbolicName为符号命名，那么就需要使用从零开始的位置符号对其进行引用
   * %0表示所有参数中的第一个，%1表示第二个，以此类推
-  * 
+  *
   * constraint指的是对操作数施加的限制（符号），
   * 也能表示其允许分布的位置（字母）：用于声明可操作数可以被放在什么位置上（内存、立即数、寄存器...）
   * "r"表示这个C表达式只能充当：寄存器
   * "m"表示这个C表达式只能充当：内存
   * "i"表示这个C表达式只能充当：立即数
   * "g"表示这个C表达式既可充当：寄存器、内存、立即数
-  * 
+  *
   * 输出操作数必须以"="或"+"开头
   * 前者表示将会覆写这个变量（只写入），后者表示可能读也可能写
   * 随后需要使用一个字母声明这个变量的可接受的位置（‘r’ for register and ‘m’ for memory）
-  * 
-  * 
+  *
+  *
   * InputOperands: 会被AssemblerTemplate中的汇编指令读取的C表达式列表
-  * 
+  *
   * Clobbers: 会被汇编指令修改的寄存器或者值列表
-  * 
+  *
   * "memory"表示指令会可能将Input或者Output当成地址并读取其中的数据
-  * 
-  * 
+  *
+  *
   */
 
   asm volatile(" movl %0, %%esp ; jmp intr_exit" : : "g"(&if_) : "memory");
 
   /* 关于指令执行的一点观察
-   * 
+   *
    * 1. 执行jmp以及call等指令，硬件会自动保存关键寄存器的值
    *    相对的，iret 就会跳回原来的地方并恢复关键寄存器的值
-   * 
+   *
    * 2. C内存中的结构体是按照定义的顺序向下长的，即如果直接使用
    *    结构体的地址访问4byte数据的话，会访问到结构体的第一个元素
    *    向上移4byte会访问到第二个元素
-   * 
+   *
    * 3. 那么这里设置esp/eip这些本来应该由硬件维护的寄存器（关键寄存器）的意义在于
    *    让 intr_exit 处的 iret 指令能利用 _if 中的数据直接跳转到程序的开始处
    *    并开始执行用户程序
-   * 
+   *
    */
   NOT_REACHED();
+}
+
+/**
+ * @brief Get the working dir of current process
+ * 
+ * @return struct dir* 
+ */
+struct dir *get_working_dir(void) {
+  struct process *pcb = thread_current()->pcb;
+  // 如果不是用户进程的话，工作目录为根目录
+  if(pcb == NULL){
+    return dir_open_root();
+  }
+  struct dir *result = NULL;
+  lock_acquire(&pcb->files_lock);
+  result = pcb->working_dir;
+  lock_release(&pcb->files_lock);
+  return result;
 }
 
 /* Waits for process with PID child_pid to die and returns its exit status.
@@ -436,18 +456,18 @@ done:
 int process_wait(pid_t child_pid) {
 
   int result = -1;
-  struct thread* tcb = thread_current();
+  struct thread *tcb = thread_current();
 
-  // 子线程的id和父进程的id之间没有固定的关系 
+  // 子线程的id和父进程的id之间没有固定的关系
   // 因此下面这些代码被注释掉了，用来引以为戒
   // if (child_pid <= tcb->tid) {
   //   return result;
   // }
 
-  struct process* pcb = tcb->pcb;
-  struct list* children = &(pcb->children);
-  struct lock* children_lock = &(pcb->children_lock);
-  struct child_process* child = NULL;
+  struct process *pcb = tcb->pcb;
+  struct list *children = &(pcb->children);
+  struct lock *children_lock = &(pcb->children_lock);
+  struct child_process *child = NULL;
   lock_acquire(children_lock);
   list_for_each_entry(child, children, elem) {
     if (child->pid == child_pid) {
@@ -464,32 +484,32 @@ int process_wait(pid_t child_pid) {
   return result;
 }
 
-/* Free the current process's resources. 
- * 
+/* Free the current process's resources.
+ *
  * 现列出需要额外释放的资源：
  * 1.进程文件描述符表
- * 
+ *
  * 2.子进程表
- * 
+ *
  * 3.线程派生出的子线程结构体好像也算在里边
- * 
+ *
  * 4.锁（待定）
- * 
+ *
  * 5.线程指针列表：除了需要释放struct thread本身之外（仿照switch_tail）
  *                还需要处理一下allelem（thread_exit）
  *                elem的问题还不好说，先不管他，毕竟thread_exit也没有退出操作
- * 
+ *
  * 6.进程名称
- *                
- * 
+ *
+ *
  * 还有其他需要做的工作：
  * 1.将退出状态返回给父进程
- * 
- * 
+ *
+ *
  */
 void process_exit(int exit_code) {
-  struct thread* cur = thread_current();
-  uint32_t* pd;
+  struct thread *cur = thread_current();
+  uint32_t *pd;
 
   /* If this thread does not have a PCB, don't worry
    * 非用户进程 直接退出
@@ -520,8 +540,8 @@ void process_exit(int exit_code) {
      If this happens, then an unfortuantely timed timer interrupt
      can try to activate the pagedir, but it is now freed memory */
   /* 需要确保子进程编辑自己的PCB之前先获取父进程的锁 */
-  struct process* pcb_to_free = cur->pcb;
-  struct semaphore* editing = pcb_to_free->editing;
+  struct process *pcb_to_free = cur->pcb;
+  struct semaphore *editing = pcb_to_free->editing;
   sema_down(editing);
   free_parent_self(pcb_to_free->self, exit_code);
   sema_up(editing);
@@ -531,9 +551,12 @@ void process_exit(int exit_code) {
   /* 释放文件描述符表 */
   file_desc_destroy(pcb_to_free);
 
+  /* 关闭进程工作目录 */
+  dir_close(pcb_to_free->working_dir);
+
   /* 释放子进程表 */
-  struct child_process* child = NULL;
-  struct semaphore* child_editing = NULL;
+  struct child_process *child = NULL;
+  struct semaphore *child_editing = NULL;
   list_clean_each(child, &(pcb_to_free->children), elem) {
     // 这里的信号量实际上相当于引用计数，false=2，true=1
     if (sema_try_down(&(child->waiting))) {
@@ -546,7 +569,7 @@ void process_exit(int exit_code) {
       free_child_self(child);
       sema_up(child_editing);
     }
-  }  
+  }
   // 尾部的if语句是必要的
   if (child != NULL) {
     if (sema_try_down(&(child->waiting))) {
@@ -572,7 +595,7 @@ void process_exit(int exit_code) {
 /* Sets up the CPU for running user code in the current
    thread. This function is called on every context switch. */
 void process_activate(void) {
-  struct thread* t = thread_current();
+  struct thread *t = thread_current();
 
   /* Activate thread's page tables. */
   if (t->pcb != NULL && t->pcb->pagedir != NULL)
@@ -586,7 +609,7 @@ void process_activate(void) {
 }
 
 /* 子进程退出时 由子进程清除父子共同资源 同时设置返回值*/
-void free_parent_self(struct child_process* self, int exit_code) {
+void free_parent_self(struct child_process *self, int exit_code) {
   if (self->exited) {
     /* 父进程已经退出 释放子进程表元素  */
     free(self->editing);
@@ -601,7 +624,7 @@ void free_parent_self(struct child_process* self, int exit_code) {
 }
 
 /* 父进程退出时 由父进程清除父子共同资源 不会将此元素从链表中剥离*/
-void free_child_self(struct child_process* child) {
+void free_child_self(struct child_process *child) {
   if (child->exited) {
     /* 子进程已经退出 释放子进程表元素  */
     free(child->editing);
@@ -675,19 +698,19 @@ struct Elf32_Phdr {
 #define PF_W 2 /* Writable. */
 #define PF_R 4 /* Readable. */
 
-static bool setup_stack(void** esp);
-static bool validate_segment(const struct Elf32_Phdr*, struct file*);
-static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
+static bool setup_stack(void **esp);
+static bool validate_segment(const struct Elf32_Phdr *, struct file *);
+static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable);
 
 /* Loads an ELF executable from FILE_NAME into the current thread.
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(const char* file_name, void (**eip)(void), void** esp) {
-  struct thread* t = thread_current();
+bool load(const char *file_name, void (**eip)(void), void **esp) {
+  struct thread *t = thread_current();
   struct Elf32_Ehdr ehdr;
-  struct file* file = NULL;
+  struct file *file = NULL;
   off_t file_ofs;
   bool success = false;
   int i;
@@ -699,16 +722,16 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   process_activate();
 
   /* Open executable file. */
-  file = filesys_open(file_name);
+  file = filesys_open_file(file_name);
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
     goto done;
   }
 
   /* Read and verify executable header. */
-  if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
-      memcmp(ehdr.e_ident, "\177ELF\1\1\1", 7) || ehdr.e_type != 2 || ehdr.e_machine != 3 ||
-      ehdr.e_version != 1 || ehdr.e_phentsize != sizeof(struct Elf32_Phdr) || ehdr.e_phnum > 1024) {
+  if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr || memcmp(ehdr.e_ident, "\177ELF\1\1\1", 7) ||
+      ehdr.e_type != 2 || ehdr.e_machine != 3 || ehdr.e_version != 1 ||
+      ehdr.e_phentsize != sizeof(struct Elf32_Phdr) || ehdr.e_phnum > 1024) {
     printf("load: %s: error loading executable\n", file_name);
     goto done;
   }
@@ -730,40 +753,40 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
       goto done;
     file_ofs += sizeof phdr;
     switch (phdr.p_type) {
-      case PT_NULL:
-      case PT_NOTE:
-      case PT_PHDR:
-      case PT_STACK:
-      default:
-        /* Ignore this segment. */
-        break;
-      case PT_DYNAMIC:
-      case PT_INTERP:
-      case PT_SHLIB:
-        goto done;
-      case PT_LOAD:
-        if (validate_segment(&phdr, file)) {
-          bool writable = (phdr.p_flags & PF_W) != 0;
-          uint32_t file_page = phdr.p_offset & ~PGMASK;
-          uint32_t mem_page = phdr.p_vaddr & ~PGMASK;
-          uint32_t page_offset = phdr.p_vaddr & PGMASK;
-          uint32_t read_bytes, zero_bytes;
-          if (phdr.p_filesz > 0) {
-            /* Normal segment.
-                     Read initial part from disk and zero the rest. */
-            read_bytes = page_offset + phdr.p_filesz;
-            zero_bytes = (ROUND_UP(page_offset + phdr.p_memsz, PGSIZE) - read_bytes);
-          } else {
-            /* Entirely zero.
-                     Don't read anything from disk. */
-            read_bytes = 0;
-            zero_bytes = ROUND_UP(page_offset + phdr.p_memsz, PGSIZE);
-          }
-          if (!load_segment(file, file_page, (void*)mem_page, read_bytes, zero_bytes, writable))
-            goto done;
-        } else
+    case PT_NULL:
+    case PT_NOTE:
+    case PT_PHDR:
+    case PT_STACK:
+    default:
+      /* Ignore this segment. */
+      break;
+    case PT_DYNAMIC:
+    case PT_INTERP:
+    case PT_SHLIB:
+      goto done;
+    case PT_LOAD:
+      if (validate_segment(&phdr, file)) {
+        bool writable = (phdr.p_flags & PF_W) != 0;
+        uint32_t file_page = phdr.p_offset & ~PGMASK;
+        uint32_t mem_page = phdr.p_vaddr & ~PGMASK;
+        uint32_t page_offset = phdr.p_vaddr & PGMASK;
+        uint32_t read_bytes, zero_bytes;
+        if (phdr.p_filesz > 0) {
+          /* Normal segment.
+                   Read initial part from disk and zero the rest. */
+          read_bytes = page_offset + phdr.p_filesz;
+          zero_bytes = (ROUND_UP(page_offset + phdr.p_memsz, PGSIZE) - read_bytes);
+        } else {
+          /* Entirely zero.
+                   Don't read anything from disk. */
+          read_bytes = 0;
+          zero_bytes = ROUND_UP(page_offset + phdr.p_memsz, PGSIZE);
+        }
+        if (!load_segment(file, file_page, (void *)mem_page, read_bytes, zero_bytes, writable))
           goto done;
-        break;
+      } else
+        goto done;
+      break;
     }
   }
 
@@ -788,11 +811,11 @@ done:
 
 /* load() helpers. */
 
-static bool install_page(void* upage, void* kpage, bool writable);
+static bool install_page(void *upage, void *kpage, bool writable);
 
 /* Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
-static bool validate_segment(const struct Elf32_Phdr* phdr, struct file* file) {
+static bool validate_segment(const struct Elf32_Phdr *phdr, struct file *file) {
   /* p_offset and p_vaddr must have the same page offset. */
   if ((phdr->p_offset & PGMASK) != (phdr->p_vaddr & PGMASK))
     return false;
@@ -811,9 +834,9 @@ static bool validate_segment(const struct Elf32_Phdr* phdr, struct file* file) {
 
   /* The virtual memory region must both start and end within the
      user address space range. */
-  if (!is_user_vaddr((void*)phdr->p_vaddr))
+  if (!is_user_vaddr((void *)phdr->p_vaddr))
     return false;
-  if (!is_user_vaddr((void*)(phdr->p_vaddr + phdr->p_memsz)))
+  if (!is_user_vaddr((void *)(phdr->p_vaddr + phdr->p_memsz)))
     return false;
 
   /* The region cannot "wrap around" across the kernel virtual
@@ -847,7 +870,7 @@ static bool validate_segment(const struct Elf32_Phdr* phdr, struct file* file) {
 
    Return true if successful, false if a memory allocation error
    or disk read error occurs. */
-static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
+static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable) {
   ASSERT((read_bytes + zero_bytes) % PGSIZE == 0);
   ASSERT(pg_ofs(upage) == 0);
@@ -862,7 +885,7 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
     size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
     /* Get a page of memory. */
-    uint8_t* kpage = palloc_get_page(PAL_USER);
+    uint8_t *kpage = palloc_get_page(PAL_USER);
     if (kpage == NULL)
       return false;
 
@@ -889,13 +912,13 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
 
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
-static bool setup_stack(void** esp) {
-  uint8_t* kpage;
+static bool setup_stack(void **esp) {
+  uint8_t *kpage;
   bool success = false;
 
   kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage != NULL) {
-    success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
+    success = install_page(((uint8_t *)PHYS_BASE) - PGSIZE, kpage, true);
     if (success)
       *esp = PHYS_BASE;
     else
@@ -913,8 +936,8 @@ static bool setup_stack(void** esp) {
    with palloc_get_page().
    Returns true on success, false if UPAGE is already mapped or
    if memory allocation fails. */
-static bool install_page(void* upage, void* kpage, bool writable) {
-  struct thread* t = thread_current();
+static bool install_page(void *upage, void *kpage, bool writable) {
+  struct thread *t = thread_current();
 
   /* Verify that there's not already a page at that virtual
      address, then map our page there. */
@@ -923,10 +946,10 @@ static bool install_page(void* upage, void* kpage, bool writable) {
 }
 
 /* Returns true if t is the main thread of the process p */
-bool is_main_thread(struct thread* t, struct process* p) { return p->main_thread == t; }
+bool is_main_thread(struct thread *t, struct process *p) { return p->main_thread == t; }
 
 /* Gets the PID of a process */
-pid_t get_pid(struct process* p) { return (pid_t)p->main_thread->tid; }
+pid_t get_pid(struct process *p) { return (pid_t)p->main_thread->tid; }
 
 /* Creates a new stack for the thread and sets up its arguments.
    Stores the thread's entry point into *EIP and its initial stack
@@ -936,7 +959,7 @@ pid_t get_pid(struct process* p) { return (pid_t)p->main_thread->tid; }
    This function will be implemented in Project 2: Multithreading. For
    now, it does nothing. You may find it necessary to change the
    function signature. */
-bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; }
+bool setup_thread(void (**eip)(void) UNUSED, void **esp UNUSED) { return false; }
 
 /* Starts a new thread with a new user stack running SF, which takes
    TF and ARG as arguments on its user stack. This new thread may be
@@ -947,7 +970,7 @@ bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED) { return false; 
    This function will be implemented in Project 2: Multithreading and
    should be similar to process_execute (). For now, it does nothing.
    */
-tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSED) { return -1; }
+tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void *arg UNUSED) { return -1; }
 
 /* A thread function that creates a new user thread and starts it
    running. Responsible for adding itself to the list of threads in
@@ -955,7 +978,7 @@ tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSE
 
    This function will be implemented in Project 2: Multithreading and
    should be similar to start_process (). For now, it does nothing. */
-static void start_pthread(void* exec_ UNUSED) {}
+static void start_pthread(void *exec_ UNUSED) {}
 
 /* Waits for thread with TID to die, if that thread was spawned
    in the same process and has not been waited on yet. Returns TID on
@@ -989,7 +1012,7 @@ void pthread_exit_main(void) {}
 
 /* Reads a byte at user virtual address UADDR. UADDR must be below PHYS_BASE.
 Returns the byte value if successful, -1 if a segfault occurred. */
-static int get_user(const uint8_t* uaddr) {
+static int get_user(const uint8_t *uaddr) {
   int result;
   asm("movl $1f, %0; movzbl %1, %0; 1:" : "=&a"(result) : "m"(*uaddr));
   return result;
@@ -997,7 +1020,7 @@ static int get_user(const uint8_t* uaddr) {
 
 /* Writes BYTE to user address UDST. UDST must be below PHYS_BASE. Returns
 true if successful, false if a segfault occurred. */
-static bool put_user(uint8_t* udst, uint8_t byte) {
+static bool put_user(uint8_t *udst, uint8_t byte) {
   int error_code;
   asm("movl $1f, %0; movb %b2, %1; 1:" : "=&a"(error_code), "=m"(*udst) : "q"(byte));
   return error_code != -1;

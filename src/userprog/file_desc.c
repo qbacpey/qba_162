@@ -4,6 +4,7 @@
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "threads/malloc.h"
+#include "filesys/file_type.h"
 
 /**
  * @brief 用于保存文件描述符的文件指针，带有类型字段
@@ -87,10 +88,10 @@ int file_desc_open(const char *name, struct process *pcb) {
 
   int result = -1;
   /* TODO 检查文件类型 */
-  enum file_type type = FILE;
+  enum file_type type = INODE_FILE;
   /* 根据文件类型，调用不同的文件系统接口打开文件 */
-  if (type == FILE) {
-    new_file = filesys_open(name);
+  if (type == INODE_FILE) {
+    new_file = filesys_open_file(name);
   } else {
     // TODO new_dir = filesys_open_dir(name);
     PANIC("Error");
@@ -105,7 +106,7 @@ int file_desc_open(const char *name, struct process *pcb) {
 
     /* 按照文件类型，配置该结构体并压入文件描述符列表 */
     new_file_desc->file.type = type;
-    if (type == FILE) {
+    if (type == INODE_FILE) {
       new_file_desc->file.file.file = (struct file *)new_file;
     } else {
       // TODO new_file_desc->file.file.dir = (struct dir *)new_file;
@@ -140,7 +141,7 @@ bool file_desc_close(uint32_t fd, struct process *pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      if (pos->file.type == FILE) {
+      if (pos->file.type == INODE_FILE) {
         file_close(pos->file.file.file);
       } else {
         // TODO dir_close(pos->file.file.dir);
@@ -166,7 +167,7 @@ void file_desc_destroy(struct process *pcb_to_free) {
   /* 释放文件描述符表，必须使用 NULL 进行初始化 */
   struct file_desc *file_pos = NULL;
   list_clean_each(file_pos, &pcb_to_free->files_tab, elem) {
-    if (file_pos->file.type == FILE) {
+    if (file_pos->file.type == INODE_FILE) {
       file_close(file_pos->file.file.file);
     } else {
       // TODO dir_close(file_pos->file.file.dir);
@@ -176,7 +177,7 @@ void file_desc_destroy(struct process *pcb_to_free) {
   }
   // 如果想要使用这个宏遍历并清除链表元素的话，尾部的if语句是必要的
   if (file_pos != NULL) {
-    if (file_pos->file.type == FILE) {
+    if (file_pos->file.type == INODE_FILE) {
       file_close(file_pos->file.file.file);
     } else {
       // TODO dir_close(file_pos->file.file.dir);
@@ -232,7 +233,7 @@ int file_desc_size(uint32_t fd, struct process *pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      if (pos->file.type == FILE) {
+      if (pos->file.type == INODE_FILE) {
         size = (int)file_length(pos->file.file.file);
       } else {
         size = -1;
@@ -263,7 +264,7 @@ int file_desc_tell(uint32_t fd, struct process *pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      if (pos->file.type == FILE) {
+      if (pos->file.type == INODE_FILE) {
         size = (int)file_tell(pos->file.file.file);
       } else {
         size = -1;
@@ -294,7 +295,7 @@ bool file_desc_seek(uint32_t fd, unsigned position, struct process *pcb) {
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      if (pos->file.type == FILE) {
+      if (pos->file.type == INODE_FILE) {
         result = true;
         file_seek(pos->file.file.file, position);
       } else {
@@ -325,7 +326,7 @@ int file_desc_read(uint32_t fd, void *buffer, unsigned size, struct process *pcb
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      if (pos->file.type == FILE) {
+      if (pos->file.type == INODE_FILE) {
         off = file_read(pos->file.file.file, buffer, size);
       } else {
         off = -1;
@@ -355,7 +356,7 @@ int file_desc_write(uint32_t fd, const void *buffer, unsigned size, struct proce
   lock_acquire(files_tab_lock);
   list_for_each_entry(pos, files_tab, elem) {
     if (pos->file_desc == fd) {
-      if (pos->file.type == FILE) {
+      if (pos->file.type == INODE_FILE) {
         off = file_write(pos->file.file.file, buffer, size);
       } else {
         off = -1;

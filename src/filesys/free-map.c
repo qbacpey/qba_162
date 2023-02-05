@@ -61,7 +61,7 @@ void free_map_close(void) { file_close(free_map_file); }
    大小为 bitmap_file_size(free_map) */
 void free_map_create(void) {
   /* Create inode. 就算 free_map_file 文件不存在，依旧可以成功创建 */
-  if (!inode_create(FREE_MAP_SECTOR, bitmap_file_size(free_map)))
+  if (!inode_create(FREE_MAP_SECTOR, bitmap_file_size(free_map), INODE_FILE))
     PANIC("free map creation failed");
 
   /* Write bitmap to file. */

@@ -1,12 +1,13 @@
 #include "filesys/filesys.h"
 #include "filesys/directory.h"
 #include "filesys/file.h"
+#include "filesys/file_type.h"
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
+#include "process.h"
 #include <debug.h>
 #include <stdio.h>
 #include <string.h>
-
 /*
  * 浅浅写下Poj1中要用到文件系统的什么功能：
  * 0. 总的要点：文件系统中的任何地方都不能修改，只能调API
@@ -112,7 +113,7 @@ bool filesys_create(const char *name, off_t initial_size) {
   block_sector_t inode_sector = 0;
   struct dir *dir = dir_open_root();
   bool success = (dir != NULL && free_map_allocate(1, &inode_sector) &&
-                  inode_create(inode_sector, initial_size) && dir_add(dir, name, inode_sector));
+                  inode_create(inode_sector, initial_size, INODE_FILE) && dir_add(dir, name, inode_sector));
   if (!success && inode_sector != 0)
     free_map_release(inode_sector, 1);
   dir_close(dir);
@@ -125,8 +126,10 @@ bool filesys_create(const char *name, off_t initial_size) {
    otherwise.
    Fails if no file named NAME exists,
    or if an internal memory allocation fails. */
-struct file *filesys_open(const char *name) {
+struct file *filesys_open_file(const char *name) {
+  /* 找到`name`所指定的文件 */
   struct dir *dir = dir_open_root();
+  /* 检查`name`是不是普通文件，如果不是，直接返回 */
   struct inode *inode = NULL;
 
   if (dir != NULL)
@@ -146,6 +149,146 @@ bool filesys_remove(const char *name) {
   dir_close(dir);
 
   return success;
+}
+
+/**
+ * @brief 查找路径`path`指定的文件是否存在，如果存在设置`inode`为指向该文件的指针，
+ * 如果不存在设置其为NULL
+ *
+ * @param path 
+ * @param struct inode **inode 
+ * @return bool 文件是否存在
+ */
+static bool lookup(const char *path, struct inode **inode) {
+  char part[NAME_MAX + 1] = {'\0'};
+  const char *_name = path;
+  const char **srcp = &_name;
+  bool look_up_result = false;
+  // 需在此Inode中查找指定名称的目录表项
+  struct inode *prev_inode = NULL;
+  // 需在此目录中查找指定名称的目录表项
+  struct dir *curr_dir = NULL;
+  // 目标名称的Inode
+  struct inode *curr_inode = NULL;
+  // 返回结果
+  *inode = NULL;
+
+  switch (get_next_part(part, srcp)) {
+  case 1:
+    /* success */
+    if (path[0] == '/') {
+      /* 路径以`/`起头（绝对路径），从根目录开始路径处理处理 */
+      curr_dir = dir_open_root();
+    } else {
+      /* 路径并非以`/`起头（相对路径或来自于`fsutil`），检查`tcb->pcb` */
+      curr_dir = dir_reopen(get_working_dir());
+    }
+
+    if (curr_dir == NULL) {
+      goto err_dir_open_fail;
+    }
+    // 打开prev_dir中名为part的inode
+    look_up_result = dir_lookup(curr_dir, part, &curr_inode);
+    dir_close(curr_dir);
+    curr_dir = NULL;
+    if (!look_up_result) {
+      goto err_path_entry_not_exist;
+    }
+    break;
+  case 0:
+    goto done;
+  case -1:
+    goto err_too_long_file_name;
+  default:
+    goto err_get_next_part_return_val;
+  }
+
+  while (true) {
+    // 在上一次的目录项的Inode中查找本次目录项的Inode
+    prev_inode  = curr_inode;
+    curr_inode  = NULL;
+    switch (get_next_part(part, srcp)) {
+    case 1:
+    /* 路径中依然存在目录项 */
+      if (inode_type(prev_inode) == INODE_FILE) {
+        // 上一次目录项类型为普通文件，但路径中依然存在目录项，说明路径中间出现了普通文件
+        inode_close(prev_inode);
+        goto err_middle_path_entry_is_regular_file;
+      } else {
+        // 上一次的目录项类型为目录，将其Inode打开为目录
+        curr_dir = dir_open(prev_inode);
+        if (curr_dir == NULL) {
+          inode_close(prev_inode);
+          goto err_dir_open_fail;
+        }
+      }
+
+      look_up_result = dir_lookup(curr_dir, part, &curr_inode);
+      dir_close(curr_dir);
+      curr_dir = NULL;
+      /* 目录中不存在目录项 */
+      if (!look_up_result) {
+        goto err_path_entry_not_exist;
+      }
+      break;
+    case 0:
+      /* 路径中无目录项，上一轮循环读取到的Inode即为路径最后目录项对应的Inode */
+      ASSERT(prev_inode != NULL);
+      *inode = prev_inode;
+      goto done;
+    case -1:
+      goto err_too_long_file_name;
+    default:
+      goto err_get_next_part_return_val;
+    }
+  }
+
+done:
+  return *inode != NULL;
+err_dir_open_fail:
+  /* 目录打开失败 */
+  PANIC("dir open fail");
+  return false;
+err_path_entry_not_exist:
+  /* 路径中有一段不存在 */
+  return false;
+err_middle_path_entry_is_regular_file:
+  /* 路径中间有一段是普通文件 */
+  return false;
+err_get_next_part_return_val:
+  PANIC("err_get_next_part_return_val");
+  return false;
+err_too_long_file_name:
+  PANIC("too-long file name");
+  return false;
+}
+
+/* Extracts a file name part from *SRCP into PART, and updates *SRCP so that the
+next call will return the next file name part. Returns 1 if successful, 0 at
+end of string, -1 for a too-long file name part. */
+static int get_next_part(char part[NAME_MAX + 1], const char **srcp) {
+  const char *src = *srcp;
+  char *dst = part;
+
+  /* Skip leading slashes. If it's all slashes, we're done. */
+  while (*src == '/')
+    src++;
+  if (*src == '\0')
+    return 0;
+
+  /* Copy up to NAME_MAX character from SRC to DST. Add null terminator. */
+  while (*src != '/' && *src != '\0') {
+    if (dst < part + NAME_MAX)
+      *dst++ = *src;
+    else
+      return -1;
+    src++;
+  }
+  *dst = '\0';
+
+  /* Advance source pointer. */
+  *srcp = src;
+  return 1;
 }
 
 /* Formats the file system. */
