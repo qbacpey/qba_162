@@ -74,8 +74,8 @@ void userprog_init(void) {
   list_init(&(pcb->files_tab));
   lock_init(&(pcb->files_lock));
 
-  /* init进程的工作目录为根目录 */
-  pcb->working_dir = dir_open_root();
+  /* init进程的工作目录为NULL, 代表无工作目录 */
+  pcb->working_dir = INIT_WORKING_DIR;
 
   /* 要让自己有一个进程表元素对应 */
   struct child_process *fake_child_elem = NULL;
@@ -158,7 +158,10 @@ pid_t process_execute(const char *file_name) {
   init_pcb_->parent = pcb;
   init_pcb_->cmd_line = fn_copy;
   // 由父进程替子进程打开其工作目录
-  init_pcb_->working_dir = dir_reopen(pcb->working_dir);
+  if(pcb->working_dir == INIT_WORKING_DIR)
+    init_pcb_->working_dir = dir_reopen(dir_open_root());
+  else
+    init_pcb_->working_dir = dir_reopen(pcb->working_dir);
 
   /* file_name的第一个空格设置为\0 拷贝系统调用参数到内核 */
   strlcpy(fn_copy, file_name, PGSIZE);
@@ -248,6 +251,7 @@ static void start_process(void *init_pcb_) {
     // If this happens, then an unfortuantely timed timer interrupt
     // can try to activate the pagedir, but it is now freed memory
     struct process *pcb_to_free = new_pcb;
+    dir_close(init_pcb->working_dir);
     t->pcb = NULL;
     free(pcb_to_free);
     free_parent_self(self, -1);
@@ -354,7 +358,6 @@ done:
   if (!success) {
     /* 如果是exited==false 但是exited_code=-1就说明PCB初始化错误 */
     self->exited = false;
-    dir_close(init_pcb->working_dir);
     sema_up(editing);
     thread_exit();
     NOT_REACHED();
@@ -434,7 +437,7 @@ done:
 struct dir *get_working_dir(void) {
   struct process *pcb = thread_current()->pcb;
   // 如果不是用户进程的话，工作目录为根目录
-  if(pcb == NULL){
+  if(pcb == NULL || pcb->working_dir == INIT_WORKING_DIR){
     return dir_open_root();
   }
   struct dir *result = NULL;
@@ -546,14 +549,18 @@ void process_exit(int exit_code) {
   free_parent_self(pcb_to_free->self, exit_code);
   sema_up(editing);
 
+  /* 关闭可执行文件 */
+  file_allow_write(pcb_to_free->exec);
   file_close(pcb_to_free->exec);
 
   /* 释放文件描述符表 */
   file_desc_destroy(pcb_to_free);
 
   /* 关闭进程工作目录 */
-  dir_close(pcb_to_free->working_dir);
-
+  if(pcb_to_free->working_dir != INIT_WORKING_DIR)
+    dir_close(pcb_to_free->working_dir);
+  pcb_to_free->working_dir = NULL;
+  
   /* 释放子进程表 */
   struct child_process *child = NULL;
   struct semaphore *child_editing = NULL;
@@ -718,15 +725,18 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
   /* Allocate and activate page directory. */
   t->pcb->pagedir = pagedir_create();
   if (t->pcb->pagedir == NULL)
-    goto done;
+    return false;
+
   process_activate();
 
   /* Open executable file. */
   file = filesys_open_file(file_name);
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
-    goto done;
+    return false;
   }
+  /* 下面的goto也加上file_allow_write的，防止修改可执行文件 */
+  file_deny_write(file);
 
   /* Read and verify executable header. */
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr || memcmp(ehdr.e_ident, "\177ELF\1\1\1", 7) ||
@@ -736,8 +746,6 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
     goto done;
   }
 
-  /* TODO 应该在下面的goto也加上file_allow_write的 防止修改可执行文件 */
-  file_deny_write(file);
   t->pcb->exec = file;
 
   /* Read program headers. */
@@ -804,6 +812,7 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
 done:
   /* We arrive here whether the load is successful or not. */
   if (!success) {
+    file_allow_write(file);
     file_close(file);
   }
   return success;

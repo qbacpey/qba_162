@@ -5,6 +5,9 @@
 #include <list.h>
 #include <stdio.h>
 #include <string.h>
+#include "threads/synch.h"
+
+/* TODO 必须要实现目录结构体列表 */
 
 /* A directory. */
 struct dir {
@@ -99,10 +102,12 @@ bool dir_lookup(const struct dir *dir, const char *name, struct inode **inode) {
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
+  inode_deny_write(dir_get_inode((struct dir *)dir));
   if (lookup(dir, name, &e, NULL))
     *inode = inode_open(e.inode_sector);
   else
     *inode = NULL;
+  inode_allow_write(dir_get_inode((struct dir *)dir));
 
   return *inode != NULL;
 }

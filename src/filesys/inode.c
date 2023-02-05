@@ -311,7 +311,7 @@ struct inode *inode_open(block_sector_t sector) {
   for (e = list_begin(&open_inodes); e != list_end(&open_inodes); e = list_next(e)) {
     inode = list_entry(e, struct inode, elem);
     if (inode->sector == sector) {
-      inode_reopen(inode);
+      inode = inode_reopen(inode);
       goto done;
     }
   }
@@ -323,10 +323,8 @@ struct inode *inode_open(block_sector_t sector) {
 
   /* Initialize. */
   list_push_front(&open_inodes, &inode->elem);
-  meta_t *inode_meta = search_sector_head(inode->sector, true);
-  safe_sector_read(inode_meta, {
-    inode->type = ((struct inode_disk *)inode_meta->block)->type;
-  });
+  meta_t *inode_meta = search_sector_head(sector, true);
+  safe_sector_read(inode_meta, { inode->type = ((struct inode_disk *)inode_meta->block)->type; });
   inode->sector = sector;
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
@@ -341,9 +339,16 @@ done:
 struct inode *inode_reopen(struct inode *inode) {
   if (inode != NULL) {
     lock_acquire(&inode->lock);
+    // 如果inode已被删除的话，不可再次打开此Inode
+    if (inode->removed) {
+      lock_release(&inode->lock);
+      inode = NULL;
+      goto done;
+    }
     inode->open_cnt++;
     lock_release(&inode->lock);
   }
+done:
   return inode;
 }
 
@@ -468,7 +473,8 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
 
   // 防止多个线程同时对正在执行文件延长的Inode做出修改
   lock_acquire(&inode->lock);
-  if (inode->deny_write_cnt || inode->removed) {
+  // 不可对已删除的目录执行任何写入操作
+  if (inode->deny_write_cnt || (inode->removed && inode_type(inode) == INODE_DIR)) {
     lock_release(&inode->lock);
     return 0;
   }
@@ -480,7 +486,6 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
     safe_sector_write(inode_meta,
                       { success = enlarge_inode((struct inode_disk *)inode_meta->block, size, offset); });
     ASSERT(inode_length(inode) == size + offset);
-    inode_allow_write(inode);
     if (!success) {
       lock_release(&inode->lock);
       return 0;
@@ -533,17 +538,21 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
    May be called at most once per inode opener.
    每个开启此文件的进程只可调用一次此函数 */
 void inode_deny_write(struct inode *inode) {
+  lock_acquire(&inode->lock);
   inode->deny_write_cnt++;
   ASSERT(inode->deny_write_cnt <= inode->open_cnt);
+  lock_release(&inode->lock);
 }
 
 /* Re-enables writes to INODE.
    Must be called once by each inode opener who has called
    inode_deny_write() on the inode, before closing the inode. */
 void inode_allow_write(struct inode *inode) {
+  lock_acquire(&inode->lock);
   ASSERT(inode->deny_write_cnt > 0);
   ASSERT(inode->deny_write_cnt <= inode->open_cnt);
   inode->deny_write_cnt--;
+  lock_release(&inode->lock);
 }
 
 /**
@@ -584,9 +593,7 @@ off_t inode_length(const struct inode *inode) {
  * @param inode
  * @return enum file_type
  */
-enum file_type inode_type(const struct inode *inode) {
-  return inode->type;
-}
+enum file_type inode_type(const struct inode *inode) { return inode->type; }
 
 /**
  * @brief 将META从sc队列移动到at队列

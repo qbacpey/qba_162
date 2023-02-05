@@ -4,7 +4,7 @@
 #include "filesys/file_type.h"
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
-#include "process.h"
+#include "userprog/process.h"
 #include <debug.h>
 #include <stdio.h>
 #include <string.h>
@@ -80,6 +80,8 @@
 struct block *fs_device;
 
 static void do_format(void);
+static int get_next_part(char [NAME_MAX + 1], const char **);
+static bool lookup(const char *, struct inode **);
 
 /* Initializes the file system module.
    If FORMAT is true, reformats the file system.
@@ -127,14 +129,17 @@ bool filesys_create(const char *name, off_t initial_size) {
    Fails if no file named NAME exists,
    or if an internal memory allocation fails. */
 struct file *filesys_open_file(const char *name) {
-  /* 找到`name`所指定的文件 */
-  struct dir *dir = dir_open_root();
-  /* 检查`name`是不是普通文件，如果不是，直接返回 */
   struct inode *inode = NULL;
+  /* 找到`name`所指定的文件 */
+  if(!lookup(name, &inode)){
+    return NULL;
+  }
 
-  if (dir != NULL)
-    dir_lookup(dir, name, &inode);
-  dir_close(dir);
+  /* 检查`name`是不是普通文件，如果不是，直接返回 */
+  if(inode_type(inode) == INODE_DIR) {
+    inode_close(inode);
+    return NULL;
+  }
 
   return file_open(inode);
 }
@@ -154,6 +159,8 @@ bool filesys_remove(const char *name) {
 /**
  * @brief 查找路径`path`指定的文件是否存在，如果存在设置`inode`为指向该文件的指针，
  * 如果不存在设置其为NULL
+ * 
+ * @note Caller需要关闭inode
  *
  * @param path 
  * @param struct inode **inode 
@@ -202,7 +209,6 @@ static bool lookup(const char *path, struct inode **inode) {
   default:
     goto err_get_next_part_return_val;
   }
-
   while (true) {
     // 在上一次的目录项的Inode中查找本次目录项的Inode
     prev_inode  = curr_inode;
