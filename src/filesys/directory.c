@@ -2,12 +2,13 @@
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#include "threads/synch.h"
 #include <list.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include "threads/synch.h"
 
-/* TODO 必须要实现目录结构体列表 */
+/* 读写任何目录文件的时候，必须持有对应的Inode读写锁 */
 
 /* A directory. */
 struct dir {
@@ -22,10 +23,47 @@ struct dir_entry {
   bool in_use;                 /* In use or free? */
 };
 
-/* Creates a directory with space for ENTRY_CNT entries in the
-   given SECTOR.  Returns true if successful, false on failure. */
-bool dir_create(block_sector_t sector, size_t entry_cnt) {
-  return inode_create(sector, entry_cnt * sizeof(struct dir_entry), INODE_DIR);
+/* 目录元数据结构体，起点必然为目录文件偏移量为0的为止 */
+struct dir_meta_entry {
+  block_sector_t dir_entry_ent; /* 目录中的表项数目 */
+  block_sector_t curr_sector;   /* 目录Inode所在扇区 */
+  block_sector_t parent_sector; /* 上一级目录Inode所在扇区 */
+  bool removed;                 /* 当前目录是否被删除 */
+};
+
+/* 目录第一个表项的起始位置 */
+#define SLOT_START_OFFSET sizeof(struct dir_meta_entry)
+
+/**
+ * @brief 创建一个初始就拥有`entry_cnt`个Slot的目录文件
+ *
+ * @param curr_sector 目录Inode所在扇区
+ * @param parent_sector 上一级目录所在扇区
+ * @param entry_cnt 目录初始拥有的Slot数目
+ * @return true
+ * @return false
+ */
+bool dir_create(block_sector_t curr_sector, block_sector_t parent_sector, size_t entry_cnt) {
+  bool success = false;
+  if (!inode_create(curr_sector, SLOT_START_OFFSET + entry_cnt * sizeof(struct dir_entry), INODE_DIR))
+    goto done;
+
+  /* 初始化目录文件 */
+  struct dir_meta_entry init_meta;
+  init_meta.removed = false;
+  init_meta.curr_sector = curr_sector;
+  init_meta.parent_sector = parent_sector;
+  init_meta.dir_entry_ent = 0;
+  struct inode *inode = inode_open(curr_sector);
+  if (inode == NULL) {
+    PANIC("Memory run out");
+    goto done;
+  }
+  success =
+      inode_write_at(inode, &init_meta, sizeof(struct dir_meta_entry), 0) == sizeof(struct dir_meta_entry);
+  inode_close(inode);
+done:
+  return success;
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -80,8 +118,8 @@ static bool lookup(const struct dir *dir, const char *name, struct dir_entry *ep
 
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
-
-  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e)
+  /* 处理不是`..`和`.`的情况 */
+  for (ofs = SLOT_START_OFFSET; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e)
     if (e.in_use && !strcmp(name, e.name)) {
       if (ep != NULL)
         *ep = e;
@@ -98,16 +136,33 @@ static bool lookup(const struct dir *dir, const char *name, struct dir_entry *ep
    a null pointer.  The caller must close *INODE. */
 bool dir_lookup(const struct dir *dir, const char *name, struct inode **inode) {
   struct dir_entry e;
+  struct dir_meta_entry init_meta;
 
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
-  inode_deny_write(dir_get_inode((struct dir *)dir));
-  if (lookup(dir, name, &e, NULL))
-    *inode = inode_open(e.inode_sector);
-  else
+  // 确保在文件被打开之前，目录仍处于未被移除状态
+  inode_lock_shared(dir_get_inode((struct dir *)dir));
+
+  if (inode_read_at(dir->inode, &init_meta, sizeof init_meta, 0) != sizeof init_meta)
+    PANIC("Inode read error");
+
+  // 检查目录是否已经被移除
+  if (init_meta.removed) {
     *inode = NULL;
-  inode_allow_write(dir_get_inode((struct dir *)dir));
+  } else {
+    // 考虑到文件名可能以..开始，因此只有name完全相当的时候才认为是两个特殊路径
+    if (strcmp(name, "..") == 0)
+      *inode = inode_open(init_meta.parent_sector);
+    else if (strcmp(name, ".") == 0)
+      *inode = inode_reopen(dir->inode);
+    else if (lookup(dir, name, &e, NULL))
+      *inode = inode_open(e.inode_sector);
+    else
+      *inode = NULL;
+  }
+
+  inode_unlock_shared(dir_get_inode((struct dir *)dir));
 
   return *inode != NULL;
 }
@@ -115,13 +170,35 @@ bool dir_lookup(const struct dir *dir, const char *name, struct inode **inode) {
 /* Adds a file named NAME to DIR, which must not already contain a
    file by that name.  The file's inode is in sector
    INODE_SECTOR.
+
+   检查目录是否被移除之前需要获取写者锁
+
    Returns true if successful, false on failure.
    Fails if NAME is invalid (i.e. too long) or a disk or memory
    error occurs. */
 bool dir_add(struct dir *dir, const char *name, block_sector_t inode_sector) {
+  bool success = false;
+  struct dir_meta_entry dir_meta;
+
+  // 确保在递增目录表项数目之前，目录仍处于未被移除状态
+  inode_lock(dir->inode);
+
+  // 读取目录元数据
+  if (inode_read_at(dir->inode, &dir_meta, sizeof dir_meta, 0) != sizeof dir_meta)
+    goto done;
+
+  // 检查目录是否已经被移除，没有移除的话就递增表项数目
+  if (!dir_meta.removed) {
+    dir_meta.dir_entry_ent++;
+    // 将更改写入到目录文件中
+    if (inode_write_at(dir->inode, &dir_meta, sizeof dir_meta, 0) != sizeof dir_meta)
+      goto done;
+  } else {
+    goto done;
+  }
+
   struct dir_entry e;
   off_t ofs;
-  bool success = false;
 
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
@@ -141,7 +218,7 @@ bool dir_add(struct dir *dir, const char *name, block_sector_t inode_sector) {
      inode_read_at() will only return a short read at end of file.
      Otherwise, we'd need to verify that we didn't get a short
      read due to something intermittent such as low memory. */
-  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e)
+  for (ofs = SLOT_START_OFFSET; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e)
     if (!e.in_use)
       break;
 
@@ -152,6 +229,7 @@ bool dir_add(struct dir *dir, const char *name, block_sector_t inode_sector) {
   success = inode_write_at(dir->inode, &e, sizeof e, ofs) == sizeof e;
 
 done:
+  inode_unlock(dir->inode);
   return success;
 }
 
@@ -167,6 +245,8 @@ bool dir_remove(struct dir *dir, const char *name) {
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
+  /* 修改目录表项数目时，需持有目录读写锁 */
+  inode_lock(dir->inode);
   /* Find directory entry. */
   if (!lookup(dir, name, &e, &ofs))
     goto done;
@@ -176,6 +256,25 @@ bool dir_remove(struct dir *dir, const char *name) {
   if (inode == NULL)
     goto done;
 
+  /* 如果待删除文件类型是目录的话，需要检查可否将其删除 */
+  if (inode_type(inode) == INODE_DIR) {
+    struct dir_meta_entry e_meta;
+    if (inode_read_at(inode, &e_meta, sizeof e_meta, 0) != sizeof e_meta)
+      goto done;
+    /* 只有在目录中表项数目为0时才删除目录 */
+    if (e_meta.dir_entry_ent == 0 && e_meta.removed != true) {
+      /* 将removed置为true，避免重复删除 */
+      e_meta.removed = true;
+
+      if (inode_write_at(dir->inode, &e, sizeof e, ofs) != sizeof e)
+        goto done;
+    } else {
+      /* 如果文件在此之前已经被移除，也算是执行成功 */
+      success = e_meta.removed == true;
+      goto done;
+    }
+  }
+
   /* Erase directory entry. */
   e.in_use = false;
   if (inode_write_at(dir->inode, &e, sizeof e, ofs) != sizeof e)
@@ -183,9 +282,18 @@ bool dir_remove(struct dir *dir, const char *name) {
 
   /* Remove inode. */
   inode_remove(inode);
-  success = true;
 
+  /* 当前目录 */
+  struct dir_meta_entry dir_meta;
+
+  if (inode_read_at(dir->inode, &dir_meta, sizeof dir_meta, 0) != sizeof dir_meta)
+    PANIC("Inode read error");
+
+  /* 递减目录表项数目 */
+  dir_meta.dir_entry_ent--;
+  success = inode_write_at(dir->inode, &dir_meta, sizeof dir_meta, 0) == sizeof dir_meta;
 done:
+  inode_unlock(dir->inode);
   inode_close(inode);
   return success;
 }
@@ -195,7 +303,7 @@ done:
    contains no more entries. */
 bool dir_readdir(struct dir *dir, char name[NAME_MAX + 1]) {
   struct dir_entry e;
-
+  inode_lock_shared(dir_get_inode(dir));
   while (inode_read_at(dir->inode, &e, sizeof e, dir->pos) == sizeof e) {
     dir->pos += sizeof e;
     if (e.in_use) {
@@ -203,5 +311,6 @@ bool dir_readdir(struct dir *dir, char name[NAME_MAX + 1]) {
       return true;
     }
   }
+  inode_unlock_shared(dir_get_inode(dir));
   return false;
 }

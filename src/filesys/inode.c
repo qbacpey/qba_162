@@ -94,16 +94,17 @@ uint8_t *cache_buffer;
 static struct lock queue_lock;
 
 /*
-TODO 需要添加同步措施
 In-memory inode. */
 struct inode {
   struct list_elem elem; /* Element in inode list. 修改时需要获取Inode队列锁 */
   block_sector_t sector; /* Sector number of disk location. 由于只会在初始化时被写入，因此不需要同步措施 */
   enum file_type type; /* 文件类型，读取时无需锁 */
-  struct lock lock;    /* Inode的锁 */
-  int open_cnt;        /* Number of openers. */
-  bool removed;        /* True if deleted, false otherwise. */
-  int deny_write_cnt;  /* 0: writes ok, >0: deny writes. */
+  struct lock i_lock;  /* Inode状态锁 */
+  struct rw_lock
+      i_rwlock; /* Inode读写锁，内核线程如果需要同步Inode文件数据读写的话，可以调用相关接口获取此锁 */
+  int open_cnt; /* Number of openers. */
+  bool removed; /* True if deleted, false otherwise. */
+  int deny_write_cnt; /* 0: writes ok, >0: deny writes. */
 };
 
 /* Cache Buffer各Block的元数据，用于维护SC队列 */
@@ -159,6 +160,36 @@ static void dealloc_inode(struct inode *);
     lock_release(&__meta->block_lock);                                                                       \
     search_sector_tail(__meta);                                                                              \
   } while (0)
+
+/* 如果内核需要同步读写Inode文件的话，可以使用如下四个接口 */
+
+/**
+ * @brief 获取写者锁
+ *
+ * @param inode
+ */
+void inode_lock(struct inode *inode) { rw_lock_acquire(&inode->i_rwlock, false); }
+
+/**
+ * @brief 释放写者锁
+ *
+ * @param inode
+ */
+void inode_unlock(struct inode *inode) { rw_lock_release(&inode->i_rwlock, false); }
+
+/**
+ * @brief 获取读者锁
+ *
+ * @param inode
+ */
+void inode_lock_shared(struct inode *inode) { rw_lock_acquire(&inode->i_rwlock, true); }
+
+/**
+ * @brief 释放读者锁
+ *
+ * @param inode
+ */
+void inode_unlock_shared(struct inode *inode) { rw_lock_release(&inode->i_rwlock, true); }
 
 /* Returns the block device sector that contains byte offset POS
    within INODE.
@@ -329,7 +360,8 @@ struct inode *inode_open(block_sector_t sector) {
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
   inode->removed = false;
-  lock_init(&inode->lock);
+  lock_init(&inode->i_lock);
+  rw_lock_init(&inode->i_rwlock);
 done:
   lock_release(&inodes_lock);
   return inode;
@@ -338,15 +370,15 @@ done:
 /* Reopens and returns INODE. */
 struct inode *inode_reopen(struct inode *inode) {
   if (inode != NULL) {
-    lock_acquire(&inode->lock);
+    lock_acquire(&inode->i_lock);
     // 如果inode已被删除的话，不可再次打开此Inode
     if (inode->removed) {
-      lock_release(&inode->lock);
+      lock_release(&inode->i_lock);
       inode = NULL;
       goto done;
     }
     inode->open_cnt++;
-    lock_release(&inode->lock);
+    lock_release(&inode->i_lock);
   }
 done:
   return inode;
@@ -365,7 +397,7 @@ void inode_close(struct inode *inode) {
 
   /* Release resources if this was the last opener. */
   lock_acquire(&inodes_lock);
-  lock_acquire(&inode->lock);
+  lock_acquire(&inode->i_lock);
   if (--inode->open_cnt == 0) {
     /* Remove from inode list and release lock. */
     list_remove(&inode->elem);
@@ -379,7 +411,7 @@ void inode_close(struct inode *inode) {
     free(inode);
   } else {
     // 由于可能会直接将Inode对应的内存释放掉，因此需要将释放锁的语句放在else中
-    lock_release(&inode->lock);
+    lock_release(&inode->i_lock);
     lock_release(&inodes_lock);
   }
 }
@@ -388,9 +420,9 @@ void inode_close(struct inode *inode) {
    has it open. */
 void inode_remove(struct inode *inode) {
   ASSERT(inode != NULL);
-  lock_acquire(&inode->lock);
+  lock_acquire(&inode->i_lock);
   inode->removed = true;
-  lock_release(&inode->lock);
+  lock_release(&inode->i_lock);
 }
 
 /* Reads SIZE bytes from INODE into BUFFER, starting at position OFFSET.
@@ -472,10 +504,10 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
   off_t bytes_written = 0;
 
   // 防止多个线程同时对正在执行文件延长的Inode做出修改
-  lock_acquire(&inode->lock);
+  lock_acquire(&inode->i_lock);
   // 不可对已删除的目录执行任何写入操作
   if (inode->deny_write_cnt || (inode->removed && inode_type(inode) == INODE_DIR)) {
-    lock_release(&inode->lock);
+    lock_release(&inode->i_lock);
     return 0;
   }
 
@@ -487,11 +519,11 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
                       { success = enlarge_inode((struct inode_disk *)inode_meta->block, size, offset); });
     ASSERT(inode_length(inode) == size + offset);
     if (!success) {
-      lock_release(&inode->lock);
+      lock_release(&inode->i_lock);
       return 0;
     }
   }
-  lock_release(&inode->lock);
+  lock_release(&inode->i_lock);
 
   while (size > 0) {
     /* Sector to write, starting byte offset within sector. */
@@ -538,21 +570,21 @@ off_t inode_write_at(struct inode *inode, const void *buffer_, off_t size, off_t
    May be called at most once per inode opener.
    每个开启此文件的进程只可调用一次此函数 */
 void inode_deny_write(struct inode *inode) {
-  lock_acquire(&inode->lock);
+  lock_acquire(&inode->i_lock);
   inode->deny_write_cnt++;
   ASSERT(inode->deny_write_cnt <= inode->open_cnt);
-  lock_release(&inode->lock);
+  lock_release(&inode->i_lock);
 }
 
 /* Re-enables writes to INODE.
    Must be called once by each inode opener who has called
    inode_deny_write() on the inode, before closing the inode. */
 void inode_allow_write(struct inode *inode) {
-  lock_acquire(&inode->lock);
+  lock_acquire(&inode->i_lock);
   ASSERT(inode->deny_write_cnt > 0);
   ASSERT(inode->deny_write_cnt <= inode->open_cnt);
   inode->deny_write_cnt--;
-  lock_release(&inode->lock);
+  lock_release(&inode->i_lock);
 }
 
 /**

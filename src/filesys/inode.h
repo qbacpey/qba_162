@@ -21,7 +21,10 @@ void inode_deny_write(struct inode*);
 void inode_allow_write(struct inode*);
 off_t inode_length(const struct inode*);
 void flush_buffer_cache(void);
-
+void inode_lock(struct inode *inode);
+void inode_unlock(struct inode *inode);
+void inode_lock_shared(struct inode *inode);
+void inode_unlock_shared(struct inode *inode);
 enum file_type inode_type(const struct inode*);
 
 #endif /* filesys/inode.h */

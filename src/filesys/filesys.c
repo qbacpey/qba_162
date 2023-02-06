@@ -80,7 +80,7 @@
 struct block *fs_device;
 
 static void do_format(void);
-static int get_next_part(char [NAME_MAX + 1], const char **);
+static int get_next_part(char[NAME_MAX + 1], const char **);
 static bool lookup(const char *, struct inode **);
 
 /* Initializes the file system module.
@@ -131,12 +131,12 @@ bool filesys_create(const char *name, off_t initial_size) {
 struct file *filesys_open_file(const char *name) {
   struct inode *inode = NULL;
   /* 找到`name`所指定的文件 */
-  if(!lookup(name, &inode)){
+  if (!lookup(name, &inode)) {
     return NULL;
   }
 
   /* 检查`name`是不是普通文件，如果不是，直接返回 */
-  if(inode_type(inode) == INODE_DIR) {
+  if (inode_type(inode) == INODE_DIR) {
     inode_close(inode);
     return NULL;
   }
@@ -159,11 +159,11 @@ bool filesys_remove(const char *name) {
 /**
  * @brief 查找路径`path`指定的文件是否存在，如果存在设置`inode`为指向该文件的指针，
  * 如果不存在设置其为NULL
- * 
+ *
  * @note Caller需要关闭inode
  *
- * @param path 
- * @param struct inode **inode 
+ * @param path
+ * @param struct inode **inode
  * @return bool 文件是否存在
  */
 static bool lookup(const char *path, struct inode **inode) {
@@ -211,11 +211,11 @@ static bool lookup(const char *path, struct inode **inode) {
   }
   while (true) {
     // 在上一次的目录项的Inode中查找本次目录项的Inode
-    prev_inode  = curr_inode;
-    curr_inode  = NULL;
+    prev_inode = curr_inode;
+    curr_inode = NULL;
     switch (get_next_part(part, srcp)) {
     case 1:
-    /* 路径中依然存在目录项 */
+      /* 路径中依然存在目录项 */
       if (inode_type(prev_inode) == INODE_FILE) {
         // 上一次目录项类型为普通文件，但路径中依然存在目录项，说明路径中间出现了普通文件
         inode_close(prev_inode);
@@ -301,7 +301,7 @@ static int get_next_part(char part[NAME_MAX + 1], const char **srcp) {
 static void do_format(void) {
   printf("Formatting file system...");
   free_map_create();
-  if (!dir_create(ROOT_DIR_SECTOR, 16))
+  if (!dir_create(ROOT_DIR_SECTOR, ROOT_DIR_SECTOR, 16))
     PANIC("root directory creation failed");
   free_map_close();
   printf("done.\n");
