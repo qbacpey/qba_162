@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <syscall-nr.h>
 
+// TODO 所有接收路径的系统调用都会拒绝以“/”结尾的路径，确保调用相关接口时任何路径都不以"/"结尾
+
 static void syscall_handler(struct intr_frame *);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
@@ -246,11 +248,7 @@ static int syscall_wait(uint32_t *args, struct process *pcb) { return process_wa
  * @return false
  */
 static bool syscall_create(uint32_t *args, struct process *pcb) {
-  bool result = false;
-
-  result = filesys_create((char *)args[1], args[2]);
-
-  return result;
+  return filesys_create((char *)args[1], args[2]);
 }
 
 /**

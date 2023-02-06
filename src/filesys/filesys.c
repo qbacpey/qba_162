@@ -4,10 +4,12 @@
 #include "filesys/file_type.h"
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
+#include "threads/malloc.h"
 #include "userprog/process.h"
 #include <debug.h>
 #include <stdio.h>
 #include <string.h>
+
 /*
  * 浅浅写下Poj1中要用到文件系统的什么功能：
  * 0. 总的要点：文件系统中的任何地方都不能修改，只能调API
@@ -82,7 +84,7 @@ struct block *fs_device;
 static void do_format(void);
 static int get_next_part(char[NAME_MAX + 1], const char **);
 static bool lookup(const char *, struct inode **);
-
+static bool parse_path(const char *, const char **, struct dir **);
 /* Initializes the file system module.
    If FORMAT is true, reformats the file system.
    可以等价地将格式化理解为初始化 */
@@ -111,15 +113,25 @@ void filesys_done(void) {
    Returns true if successful, false otherwise.
    Fails if a file named NAME already exists,
    or if internal memory allocation fails. */
-bool filesys_create(const char *name, off_t initial_size) {
+bool filesys_create(const char *path, off_t initial_size) {
+  bool success = false;
+  /* 文件名称 */
+  const char *name = NULL;
+  /* 新文件的上一级目录 */
+  struct dir *dir = NULL;
+
+  if (!parse_path(path, &name, &dir))
+    goto done;
+
+  /* 将新文件添加到目录中 */
   block_sector_t inode_sector = 0;
-  struct dir *dir = dir_open_root();
-  bool success = (dir != NULL && free_map_allocate(1, &inode_sector) &&
-                  inode_create(inode_sector, initial_size, INODE_FILE) && dir_add(dir, name, inode_sector));
+
+  success = (dir != NULL && free_map_allocate(1, &inode_sector) &&
+             inode_create(inode_sector, initial_size, INODE_FILE) && dir_add(dir, name, inode_sector));
   if (!success && inode_sector != 0)
     free_map_release(inode_sector, 1);
   dir_close(dir);
-
+done:
   return success;
 }
 
@@ -128,15 +140,15 @@ bool filesys_create(const char *name, off_t initial_size) {
    otherwise.
    Fails if no file named NAME exists,
    or if an internal memory allocation fails. */
-struct file *filesys_open_file(const char *name) {
+struct file *filesys_open_file(const char *path) {
   struct inode *inode = NULL;
-  /* 找到`name`所指定的文件 */
-  if (!lookup(name, &inode)) {
+  /* 找到`path`所指定的文件 */
+  if (!lookup(path, &inode)) {
     return NULL;
   }
 
-  /* 检查`name`是不是普通文件，如果不是，直接返回 */
-  if (inode_type(inode) == INODE_DIR) {
+  /* 检查`path`是不是普通文件，如果不是，直接返回 */
+  if (inode_type(inode) != INODE_FILE) {
     inode_close(inode);
     return NULL;
   }
@@ -144,13 +156,34 @@ struct file *filesys_open_file(const char *name) {
   return file_open(inode);
 }
 
+/**
+ * @brief 打开名为`path`的目录文件
+ *
+ * @param path
+ * @return struct dir*
+ */
+struct dir *filesys_open_dir(const char *path) {
+  struct inode *inode = NULL;
+  /* 找到`path`所指定的目录 */
+  if (!lookup(path, &inode)) {
+    return NULL;
+  }
+
+  /* 检查`path`是不是目录文件，如果不是，直接返回 */
+  if (inode_type(inode) != INODE_DIR) {
+    inode_close(inode);
+    return NULL;
+  }
+  return dir_open(inode);
+}
+
 /* Deletes the file named NAME.
    Returns true if successful, false on failure.
    Fails if no file named NAME exists,
    or if an internal memory allocation fails. */
-bool filesys_remove(const char *name) {
+bool filesys_remove(const char *path) {
   struct dir *dir = dir_open_root();
-  bool success = dir != NULL && dir_remove(dir, name);
+  bool success = dir != NULL && dir_remove(dir, path);
   dir_close(dir);
 
   return success;
@@ -162,7 +195,7 @@ bool filesys_remove(const char *name) {
  *
  * @note Caller需要关闭inode
  *
- * @param path
+ * @param path 文件路径，可以是绝对路径，也可以是相对路径
  * @param struct inode **inode
  * @return bool 文件是否存在
  */
@@ -187,7 +220,11 @@ static bool lookup(const char *path, struct inode **inode) {
       /* 路径以`/`起头（绝对路径），从根目录开始路径处理处理 */
       curr_dir = dir_open_root();
     } else {
-      /* 路径并非以`/`起头（相对路径或来自于`fsutil`），检查`tcb->pcb` */
+      /* 路径并非以`/`起头（相对路径或来自于`fsutil`），检查`tcb->pcb`
+         因为`dir_lookup`可以很好地应对目录项是`..`或者`.`的情况，
+         寻找某个目录的`.`以及`..`表项。同时"../"也可以被理解为寻找某个目录的
+         上一级目录，因此可以将`curr_dir`设定为工作目录之后再在其中寻找目录
+       */
       curr_dir = dir_reopen(get_working_dir());
     }
 
@@ -305,4 +342,52 @@ static void do_format(void) {
     PANIC("root directory creation failed");
   free_map_close();
   printf("done.\n");
+}
+
+/**
+ * @brief
+ * 解析`path`，如果成功返回`true`，同时将`name`设置为路径末尾的文件名，将`dir`设置为指向文件上一级目录的指针
+ *
+ * @param path
+ * @param name
+ * @param dir
+ * @return true
+ * @return false
+ */
+static bool parse_path(const char *path, const char **name, struct dir **dir) {
+  ASSERT(path != NULL);
+  ASSERT(name != NULL);
+  ASSERT(dir != NULL);
+  size_t path_len = strlen(path);
+  if (*path == '\0' || path[path_len] == '/')
+    return false;
+
+  /* 计算目录路径并复制 */
+  char *last_slash = strrchr(path, '/');
+  if (last_slash != NULL) {
+    /* path中有 / 存在 */
+
+    char *dir_path = malloc(path_len);
+    /* 复制目录路径 */
+    memcpy(dir_path, path, last_slash - path);
+    struct inode *dir_inode = NULL;
+
+    /* 查找目录文件的Inode */
+    if (!lookup(dir_path, &dir_inode) || inode_type(dir_inode) == INODE_FILE) {
+      free(dir_path);
+      return false;
+    }
+
+    ASSERT(dir_inode != NULL);
+
+    *name = last_slash + 1;
+    *dir = dir_open(dir_inode);
+    free(dir_path);
+  } else {
+    /* path只有一个文件名，需使用当前工作目录 */
+    *name = path;
+    /* 注意套上一个dir_reopen */
+    *dir = dir_reopen(get_working_dir());
+  }
+  return true;
 }

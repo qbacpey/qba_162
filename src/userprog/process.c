@@ -432,6 +432,8 @@ done:
 /**
  * @brief Get the working dir of current process
  * 
+ * @note 记得套上一个`dir_reopen`
+ * 
  * @return struct dir* 
  */
 struct dir *get_working_dir(void) {
