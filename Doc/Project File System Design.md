@@ -71,13 +71,13 @@
 /*  */
 /* Cache Buffer各Block的元数据，用于维护SC队列 */
 struct meta {
-  	struct lock meta_lock; /* 元数据锁 */
-    block_sector_t sector; /* Block对应扇区的下标 */
-    int worker_cnt; /* 等待或正在使用Block的线程数 */
-    bool dirty; /* Dirty Bit */
-    struct rw_lock block_lock; /* Block的RW锁 */
-    uint8_t *block; /* 元数据对应的Block */
-    struct list_elem elem; /* 必然位于SC或者Active中 */
+  struct lock meta_lock;     /* 元数据锁 */
+  block_sector_t sector;     /* Block对应扇区的下标 */
+  int worker_cnt;            /* 等待或正在使用Block的线程数 */
+  bool dirty;                /* Dirty Bit */
+  struct rw_lock block_lock; /* Block的RW锁 */
+  uint8_t *block;            /* 元数据对应的Block */
+  struct list_elem elem;     /* 必然位于SC或者Active中 */
 };
 ~~~
 
@@ -142,7 +142,7 @@ struct meta {
 
 #### 扇区查找函数
 
-> 函数功能：确保指定扇区被加载到Cache Buffer中，返回与该扇区对应的`meta`指针
+> 函数功能：确保指定扇区被加载到Cache Buffer中，将其对应的Cache Buffer Block读取为合适的值（按照读取旗标的要求），返回与该扇区对应的`meta`指针
 >
 > 函数参数：
 >
@@ -158,7 +158,7 @@ struct meta {
 
 1. **获取队列锁**；
 2. [遍历队列函数](#遍历队列函数)：判断是否已经将目标扇区加载到队列中；
-3. [Evict Block函数](#Evict Block函数)：判断是否需要将某个Block Evict回磁盘；
+3. [Evict Meta函数](#Evict Meta函数)：判断是否需要将某个Block Evict回磁盘；
 4. **释放队列锁**；
 5. **按照调用时给定的参数**，确定是否需要将目标扇区读取到Cache Buffer中；
 7. 返回指向`meta`的指针；
@@ -184,20 +184,22 @@ struct meta {
 - 如果`sector`等于目标值，查找成功，保持`worker_cnt`递增值并返回；
 - 如果`sector`等于目标值，查找失败，递减`worker_cnt`，继续检查队列中的下一个Block；
 
-##### Evict Block函数
+如果在黄色队列中找到了`sector`，需要执行队列移动操作
 
-> 函数功能：反向遍历队列，寻找可被移出Cache Buffer的`meta`，同时将其移动到队列中合适的位置，并将其对应的Cache Buffer Block读取为合适的值（按照读取旗标的要求）：
+##### Evict Meta函数
+
+> 函数功能：反向遍历队列，寻找可被移出Cache Buffer的`meta`，同时将其移动到队列中合适的位置：
 >
 > + 符合移出条件：将`meta`各字段改为目标值，但维持Dirty Bit不变，不在此执行Write-Back操作；
 > + 不符合移出条件：一直循环遍历两个队列，找到为止；
 >
-> 字段修改完毕之后即执行队列操作，将`meta`移动到合适的位置，随后执行磁盘操作，最后返回`meta`指针
+> 字段修改完毕之后即执行队列操作，将`meta`移动到合适的位置，最后返回`meta`指针
 
-如果没有在队列中找到合适的`meta`，那么就需要执行Evict Block操作：
+如果没有在队列中找到合适的`meta`，那么就需要执行Evict Meta操作：
 
 1. 从`sc_blocks`末尾开始倒序遍历`meta`，Evict之前需要检查`worker_cnt`的值（需确保[同步](#扇区查找函数中的同步)）：
-   + 如果`worker_cnt > 1`，那么说明现在有线程正在读取Buffer中的信息，切换到队列中的下一个`meta`；
-   + 如果`worker_cnt == 1`，那么说明现在没有线程正在读取Buffer中的信息，可将该[`meta`移出队列](#磁盘操作)；
+   + 如果`worker_cnt > 0`，那么说明现在有线程正在读取Buffer中的信息，切换到队列中的下一个`meta`；
+   + 如果`worker_cnt == 0`，那么说明现在没有线程正在读取Buffer中的信息，可将该[`meta`移出队列](#磁盘操作)；
 2. 如果无论是`active_blocks`还是`sc_blocks`中都没有合适的`meta`，那么重复第一步；
    - 递减某个`worker_cnt`并不需要获取队列锁，同时线程读写Cache Buffer之前必然会将其`worker_cnt`递增，不用担心该`meta`被意外Evict，因此只有线程读写完毕之后将`worker_cnt`递减，那么此线程终会检测到队列中出现了一个可被Evict的`meta`，循环遍历队列自然没有什么问题；
    - 不过或许可以在遍历整个队列，发现其中没有可供Evict的Block时，调用`thread_yield`让出CPU；
@@ -205,13 +207,6 @@ struct meta {
 3. 根据队列类型执行合适的[队列操作](#队列操作)；
 4. 执行[磁盘操作](#磁盘操作)；
 5. 返回`meta`指针
-
-###### 队列操作
-
-根据`meta`所处队列的不同，应该如何处理该`meta`也有所不同：
-
-1. 如果`meta`位于绿色队列，无需在队列中移动`meta`；
-2. 如果`meta`位于黄色队列，将其移到绿色队列头部，将绿色队列尾部`meta`移动到黄色队列头部；
 
 ###### 磁盘操作
 
@@ -236,14 +231,21 @@ struct meta {
 + 确保满足[如下条件](#扇区查找函数中的同步)时，释放队列锁；
 + 在Cache Buffer中进行数据读写；
 
-###### 读取旗标
+#### 队列操作
+
+根据`meta`所处队列的不同，应该如何处理该`meta`也有所不同：
+
+1. 如果`meta`位于绿色队列，无需在队列中移动`meta`；
+2. 如果`meta`位于黄色队列，将其移到绿色队列头部，将绿色队列尾部`meta`移动到黄色队列头部；
+
+#### 读取旗标
 
 如果是直接覆写目标扇区所有内容的话，不需要将扇区中的内容读取到Cache Buffer中：
 
 1. `inode_write_at` 判断需要覆盖整个扇区所有内容时，无需预先读取；
 2. `inode_create` 会直接将大小为一个扇区的Inode覆写到磁盘中，也无需预先读取；
 
-另外，只写流程实际指的是读取旗标为`false`，也就是调用Evict Block函数腾出一个`meta`，但是不把磁盘中的数据读取到其中
+另外，只写流程实际指的是读取旗标为`false`，也就是调用Evict Meta函数腾出一个`meta`，但是不把磁盘中的数据读取到其中
 
 #### Free Map
 
@@ -254,6 +256,8 @@ struct meta {
 #### 停机
 
 停机时，需要遍历两条队列，将其中所有的Dirty Block写入到磁盘中。此外也需要将Free Map写入到磁盘中
+
+同时记得将所有buffer都释放掉
 
 ### Synchronization
 
@@ -356,9 +360,9 @@ struct indirect_blk_t {
 二级间接块，大小为`BLOCK_SECTOR_SIZE`，保存着一个`indirect_blk_t[128]`数组：
 
 ~~~c
-struct dbindirect_blk_t {
-	block_sector_t indirect_ary[128];
-};
+typedef struct dbi_blk {
+  block_sector_t arr[128];
+} dbi_blk_t;
 ~~~
 
 #### `inode_disk`
@@ -368,13 +372,12 @@ Inode的底层表示，创建时最好使用`calloc`申请空间：
 ~~~c
 /*  */ 
 struct inode_disk {
-  block_sector_t start; /* First data sector. */
-  off_t length;         /* File size in bytes. */
-  unsigned magic;       /* Magic number. */
-  block_sector_t direct_ary[64]; /* 直接块的下标 */
-  block_sector_t indirect_ary[32]; /* 间接块的下标 */
-  block_sector_t dbindirect_ary; /* 二级间接块的下标 */
-  uint32_t unused[125 - 64 - 32 -1]; /* Not used. */
+  off_t length;                                 /* File size in bytes. */
+  unsigned magic;                               /* Magic number. */
+  block_sector_t dr_arr[INODE_DIRECT_COUNT];    /* 直接块的下标 */
+  block_sector_t idr_arr[INODE_INDIRECT_COUNT]; /* 间接块的下标 */
+  block_sector_t dbi_arr;                       /* 二级间接块的下标 */
+  uint32_t unused[126 - INODE_DIRECT_COUNT - INODE_INDIRECT_COUNT - INODE_DB_INDIRECT_COUNT]; /* Not used. */
 };
 ~~~
 
@@ -444,14 +447,16 @@ struct inode {
 
 ##### Sparse ﬁles
 
-分配空洞部分的扇区时令它们都指向一个特殊的扇区（Sparse ﬁles扇区），其中内容全为0
+分配空洞部分的扇区时令它们都指向一个特殊的扇区（Sparse ﬁles扇区，扇区号为`3`），其中内容全为0
+
+此扇区不会出现在Cache Buffer中，仅仅只是在`free_map`中将这个扇区号提前预留，任何针对此扇区的读取和写入操作都**不会**经过Cache Buffer。具体来说，如果`inode_read_at`中发现指定扇位置对应的直接块为`3`，那么直接清空传入的`buffer`即可
 
 此时文件Inode中和空洞部分对应的Entry保存着该扇区的下标，读取时只能读取到0
 
 如果`inode_write_at`利用`byte_to_sector`获知扇区为Sparse ﬁles扇区的话：
 
 + 在`free_map`中申请一个扇区；
-+ 调用[Evict Block函数](#执行Evcit Block函数)腾出一个`meta`；
++ 调用[Evict Meta函数](#执行Evcit Block函数)腾出一个`meta`；
 + 将`meta`中的Sparse ﬁles扇区换成新扇区的值；
 + 将`meta.block`清空；
 
@@ -486,6 +491,10 @@ struct inode {
 > + 确保`[n, 128)`之间的所有数组元素都为`0`，如果该位置原先存在数据：
 >   + Sparse ﬁles扇区：直接赋值为`0`即可；
 >   + 实际扇区：把它从`free_map`中释放掉；
+> + 函数不会对底层直接块进行读写操作，只会调用`free_map`来申请新的扇区空间，不会执行`create_write_sector`清空其中内容：
+>   + EOF所在扇区的“无人区”需要由`inode_write_at`确保清空；
+>   + 新写入位置所在扇区之前的”无人区“也需要由该函数确保清空；
+>   + 需要注意EOF和新写入位置之间是“无人区”的情况；
 >
 > 函数参数：
 >
@@ -501,7 +510,7 @@ struct inode {
 
 无论是分配间接块还是释放间接块中都可以调用此函数，但是此函数必须在如下场景中被调用：
 
-+ Caller申请新扇区并调用Evict Block函数腾出一个新的`meta`，将新的扇区下标赋值给`meta`；
++ Caller申请新扇区并调用Evict Meta函数腾出一个新的`meta`，将新的扇区下标赋值给`meta`；
 + 确保读写`meta`时同步（持有读者锁之后再调用此函数）；
 + 调用此函数，利用`meta.block`将Cache Buffer当成`indirect_blk_t`并对其进行修改（写入完毕需要递减`worker_cnt`）；
   + 如果成功，重复此过程直到完成申请目标；
@@ -511,6 +520,17 @@ struct inode {
     + 重复上述两步直到回到原点；
 
 无论是Inode本体申请间接块，还是二级间接块申请间接块，亦或者是Inode申请二级间接块，都需要遵循上述逻辑
+
+###### 扇区数量计算
+
+总体而言，使用**所需扇区数量**作为Resize函数的计算标准以及量纲
+
+以拓展文件时，计算所需Sparse扇区数量以及实际空余数量扇区为例：
+
++ 关键位置：
+  + EOF扇区位置：由于分配新扇区时，EOF所在扇区无需再次分配，EOF需使用`inode.length`向上取整512，再除以512；
+  + Sparse扇区数量：由于Sparse扇区是EOF所在扇区与`offset`所在扇区的差值，因此如果想要计算Sparse扇区数量，需要使用`offset`向下取整512并除以512，再减去EOF的扇区位置；
+  + 实际空余扇区数量：需要使用新EOF扇区位置（`offset + size`向上取整并除以512）减去`offset`所在扇区（`offset + size`向下取整并除以512）；
 
 #### 磁盘空间耗尽
 
@@ -569,13 +589,196 @@ struct inode {
 
 ----------
 ## Subdirectories
+
+TODO:
+
++ 可使用长度大于14的路径名查找文件；
+  + 尽管单文件名称的限制为14，但是路径名整体可以大于14；
+  + 简单来说需要在系统调用桩这一层级就将路径名解析为合理值；
++ 每个进程都有自己的工作目录：
+  + 系统第一个用户进程的工作目录为根目录；
+  + 如果进程是通过`exec`被其他进程所启动的，那么新进程会继承旧进程的工作目录。不过随后这两个之间就不存在关联了；
+  + 进程可以删除正在被其他进程作为工作目录或打开的目录，前提是不能在已被删除的目录中创建新文件；
++ 进程现有的文件描述符打开表需要为目录提供支持；
++ 系统调用能将文件名解析为合适的绝对路径或者相对路径：
+  + 相对于当前工作目录的路径是相对路径：路径名称不以`/`起头；
+  + 相对于根目录的路径是绝对路径：路径名称以`/`起头；
+  + 每个文件中都需要有`.`以及`..`，供相对路径可以正确发挥作用；
+  + 还有关于路径解析的小问题，具体看PDF的FAQ部分；
++ 系统调用：
+  + `open`：不仅可以打开普通文件，也可以打开目录文件；
+  + `read/write`：不可以使用这两个系统调用读取目录文件，必须通过`readdir/mkdir`完成这一工作；
+  + `remove`：不仅可以删除普通文件，还可以删除空的目录文件（除了根目录）；
+  + `close`：支持关闭目录文件；
+  + You must add the following system calls to allow user programs to manipulate directories: `chdir`, `mkdir`, `readdir`, `isdir`. 
+  + You must also update the following system calls so that they work with directories: `open`, `close`, `exec`, `create`, `remove`, `inumber`.
+
+如果将`tar`作为用户进程运行的话
+
 ### Data Structures and Functions
+
+#### 进程文件打开表
+
+考虑到如下因素：
+
++ 目录的底层数据结构（`struct dir`）和文件的底层数据结构（`struct file`）有所不同；
++ 如果为在PCB中单独添加一个“目录打开表”的话，需要再写一套和维护“文件打开表”相同的代码；
++ 本质上来说，无论是目录还是文件底层都是`inode`，基本可以使用相同的方式进行维护；
+
+因此需要对PCB文件打开表的结构体做出如下修改：
+
+~~~c
+/**
+ * @brief 用于表示struct file_in_desc中文件的类型为普通文件还是目录文件
+ * 
+ */
+enum file_type { FILE, DIR };
+
+/**
+ * @brief 用于保存文件描述符的文件指针，带有类型字段
+ * 
+ */
+struct file_in_desc {
+  union {
+    struct file *file; /* 文件指针，务必注意释放问题 */
+    struct dir *dir; /* 目录指针，务必注意释放问题 */
+  } file;
+  enum file_type type; /* file的类型 */
+};
+
+/**
+ * @brief 文件描述符表元素
+ *
+ * 开启即创建，关闭即释放，创建的时候使用files_next_desc作为本文件的文件描述符，随后将这个值进行递增处理
+ *
+ */
+struct file_desc {
+  uint32_t file_desc; /* 文件描述符，从3开始 */
+  struct file_in_desc; /* 文件指针 */
+  struct list_elem elem;
+};
+
+~~~
+
+与此同时，所有针对进程文件描述符的操作都不在直接通过成员访问（`->`）实现，而是通过接口进行实现（`file_desc_*`）
+
+#### 进件工作目录
+
+只需在`struct process`添加一个字段即可
+
+~~~c
+~~~
+
 
 
 ### Algorithms
 
+自下而上地，文件系统相关的接口可以分为如下五个层级：
+
+1. Inode操作接口（`inode_*`）：直接读写Inode对应文件中的内容，不论是目录还是普通文件；
+2. 普通文件与目录文件操作接口（`file.c: file_*, dic.c: dir_*`）：用于读写文件、读取目录表项、获取文件大小、读取Inode等等；
+3. 文件系统接口（`filesys_*`）：用于创建、打开、关闭、删除普通文件以及目录文件；
+   - 需要在这一层处理以及解析文件路径；
+   - 原有的接口语义不变，可能需要改成专用于根目录的文件接口或者专用于文件的接口；
+   - 需要添加几个专用于创建目录、移除目录、读写目录的接口；
+4. 文件描述符表操作接口（`file_desc_*`）：用于操作进程文件描述符表中的表项：
+   - 进程只能读取位于文件描述符表中的文件，因此无论是读取目录还是读取普通文件，都需要通过此类接口帮助其完成工作；
+   - 关于进程工作目录：当进程进入某个目录时打开此目录作为新的工作目录，同时关闭旧有的工作目录；
+5. 系统调用接口（`syscall_*`）：用户进程执行文件相关系统调用的桩程序；
+   - 由于普通文件和目录文件都位于进程文件打开表中，因此所有文件操作都需要通过`file_desc_*`来完成；
+
+#### 文件系统接口
+
+原有文件系统的含义不变，依然局限于普通文件操作，唯一的变化在于对复杂文件路径的处理。如果需要操作目录文件的话，需要使用其他接口。具体来说，`filesys_open`需更名为`filesys_open_file`，如果给定的文件名为目录，那么返回`NULL`；如果要打开目录的话，需要使用另一个`filesys_open_dir`接口。
+
+需要在文件系统内部实现一个用于判断指定`inode`文件类型接口：
+
++ 如果指定`inode`是目录文件那么返回`enum file_type DIR`，反之`enum file_type FILE`；
++ 防止暴露文件系统内部的`inode`实现；
+
+这一层的主要任务是对文件路径进行解析处理：
+
++ 路径并非以`/`起头（相对路径或来自于`fsutil`），检查`tcb->pcb`：
+  + 如果为`NULL`：内核线程，读取根目录中的对应名称文件；
+  + 如果不为`NULL`：用户线程（也可能是`init`线程，有一个Mini PCB），读取进程工作目录中的对应名称文件；
++ 路径以`/`起头（绝对路径），从根目录开始路径处理处理；
+
+#### 文件描述符表
+
+操作文件描述符表：
+
++ 任何涉及解析文件路径的操作都交由文件系统接口；
++ 读取文件、获取文件大小这一类无需解析路径的操作可直接调用第二层接口；
+
+由于引入了文件的类型字段，因此所有对进程文件打开表的操作都通过相关接口进行实现。不仅如此，任何通过传递文件来完成的操作都必须被此类接口封装。
+
+此外需要注意的是，由于普通文件的读写和目录文件的读写有不同的底层实现，因此对应的自然就有两套接口。
+
+##### `file_desc_open`
+
+~~~c
+~~~
+
+
+
+##### `file_desc_read`
+
+
+
+##### `file_desc_write`
+
+#### 目录中的内容
+
+初始化目录时，其第一个扇区的前三个Slot必然为结构体`struct dir_meta_entry`
 
 ### Synchronization
+
+#### 目录读写同步
+
+从普通文件的角度：
+
++ 删除普通文件不会关闭此文件；
++ 文件被删除之后依然可读可写；
++ 除了此前已经将该文件打开的进程，其他任何进程都不可打开此文件；
++ 文件可以继续存在直到所有指向该文件的文件描述符都被关闭为止；
+
+从目录文件的角度：
+
++ 不可在已被删除的目录中创建新的目录表项；
++ 只有空目录（目录表项仅有`.`和`..`）可以被删除；
++ 不可打开已被删除的目录中的任何文件，包括`.`和`..`；
+
+可以读取或修改原有的目录表项，也可以删除目录表项。但是由于只有空目录可以被删除，同时目录中的`.`和`..`不可被删除，因此实际可以认为，**目录已被删除的情况下，只可以读取其中的数据，不可做出任何修改**；
+
+##### 删除目录
+
+何时可以删除目录：
+
+- 目录为空（只有`.`和`..`）：读取第一个Slot获取当前目录中表项数目；
+- 可以在目录文件中写入内容：`deny_write == 0`，没有其他线程正在读取目录中的表项；
+
+如何删除目录：
+
+1. 首先确保现在可以进行目录删除操作（满足上述两个条件）；
+2. 将第一个Slot中的删除旗标置为1；
+3. 将`inode->remove`设置为`true`；
+
+##### 在目录中创建文件
+
+由于创建文件涉及磁盘写入，因此不能使用延迟写入来将其与删除目录进行同步。不过由于目录中的文件数目和删除旗标被保存在同一个插槽（第一个）中，因此真正修改目录文件的某个Slot之前，需要先向目录中文件数目递增。具体来说：
+
+1. 读取目录的`struct dir_meta_entry`，检查文件是否已被删除；
+2. 如果文件已被删除，直接返回。反之递增目录中文件的数目；
+3. 遍历其余内容，直到找到一个空的Slot为止；
+
+##### 打开目录中的文件
+
+简单来说，打开文件实际是在文件中查找对应表项，随后对找到的Inode调用`inode_open`，全程不涉及任何**写入操作**。因此可以在检查目录中内容之前，调用`inode_deny_write`限制其他线程对Inode的写入操作，进而确保在此线程调用`inode_allow_write`之前，目录不可能被移除（移除目录的时间节点为**修改**目录的`struct dir_meta_entry`，意味着必须要对Inode执行写入操作才能删除目录），具体来说需要执行如下操作：
+
+1. 调用`inode_deny_write`限制对Inode的写入操作；
+2. 检查目录的`struct dir_meta_entry`，确认目录是否已经在延迟写入之前就被删除了；
+3. 如果没有被删除，照常遍历并打开找到的文件即可；
+4. 无论如何，调用`inode_allow_write`允许写入；
 
 
 ### Rationale
