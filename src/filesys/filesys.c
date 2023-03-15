@@ -6,7 +6,7 @@
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
 #include "filesys/directory.h"
-
+#include "userprog/filesys_lock.h"
 /*
  * 浅浅写下Poj1中要用到文件系统的什么功能： 
  * 0. 总的要点：文件系统中的任何地方都不能修改，只能调API
