@@ -97,7 +97,7 @@ static void kill(struct intr_frame* f) {
          */
       if(f->vec_no == 14){
          // kernel page fault
-         process_exit_exception(-1);
+         process_exit_normal(-1);
       } 
       intr_dump_frame(f);
       PANIC("Kernel bug - unexpected interrupt in kernel");

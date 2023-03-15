@@ -24,7 +24,7 @@ enum exiting_status {
   EXITING_NONE, /* 未发生任何退出事件 */
   EXITING_MAIN, /* 主线程正在执行pthread_exit_main */
   EXITING_NORMAL, /* 执行系统调用exit触发的退出事件 可能位于退出进程的后半段 */
-  EXITING_EXCEPTION /* 进程已因异常退出 */
+  EXITING_EXCEPTION /* 进程已因异常退出（此事件废弃，现在的系统已不可能出现此事件） */
 };
 struct registered_lock {
   lock_t* lid;           /* 锁的标识符 */
