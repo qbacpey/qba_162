@@ -111,6 +111,8 @@ static void pthread_exit(void) {
   ASSERT(!intr_context());
   struct thread *t = thread_current();
 
+  intr_disable();
+  wake_up_joiner(t);
   /* 释放pos的用户栈 */
   void *stack = ((void *)PHYS_BASE - t->stack_no * STACK_SIZE) - PGSIZE;
   bitmap_set(t->pcb->stacks, t->stack_no, false);
@@ -118,11 +120,6 @@ static void pthread_exit(void) {
   pagedir_clear_page(t->pcb->pagedir, stack);
   process_activate();
 
-  lock_acquire(&t->join_lock);
-  wake_up_joiner(t);
-  lock_release(&t->join_lock);
-
-  intr_disable();
   t->pcb->active_threads--;
   thread_zombie(t);
   NOT_REACHED();
@@ -131,17 +128,15 @@ static void pthread_exit(void) {
 /**
  * @brief 如果此线程有Joiner的话，将他叫醒
  *
- * @pre 调用此函数时，必须持有当前线程的`join_lock`
+ * @pre 调用此函数时，必须禁用外部中断
  *
  * @param t
  */
 void wake_up_joiner(struct thread *t) {
+  ASSERT(intr_get_level() == INTR_OFF);
   struct thread *joiner = t->joined_by;
   if (joiner != NULL) {
-    lock_acquire(&joiner->join_lock);
-    joiner->joining = NULL;
     thread_unblock(joiner);
-    lock_release(&joiner->join_lock);
   }
 }
 
@@ -164,9 +159,6 @@ void pthread_exit_main(void) {
   ASSERT(is_main_thread(tcb, pcb));
   bool exiting = false;
 
-  lock_acquire(&tcb->join_lock);
-  wake_up_joiner(tcb);
-  lock_release(&tcb->join_lock);
 
   /* == 判断当前退出事件等级 == */
   enum intr_level old_level = intr_disable();
@@ -175,6 +167,7 @@ void pthread_exit_main(void) {
     /* 主线程退出时只会标记退出事件以及`thread_exit`，不会将自己从PCB线程队列中移除 */
     pcb->exiting = EXITING_MAIN;
     pcb->thread_exiting = tcb;
+    wake_up_joiner(tcb);
     /* 阻塞直到自己是进程所有线程中的最后一个 */
     while (pcb->active_threads > 1)
       thread_block();
@@ -225,14 +218,12 @@ void process_exit_normal(int exit_code) {
   struct process *pcb = tcb->pcb;
   bool exiting = false;
 
-  lock_acquire(&tcb->join_lock);
-  wake_up_joiner(tcb);
-  lock_release(&tcb->join_lock);
 
   /*
    * 判断当前退出事件等级
    */
   enum intr_level old_level = intr_disable();
+  wake_up_joiner(tcb);
   set_exit_code(pcb, exit_code);
   /* 如果自己是第一个执行`exit`系统调用的线程 */
   if (pcb->exiting == EXITING_NONE) {

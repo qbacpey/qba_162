@@ -103,13 +103,11 @@ static void start_pthread(void* exec_) {
   struct process* pcb = init_tcb->pcb;
   struct intr_frame if_;
 
-  lock_acquire(&t->join_lock);
-  t->pcb = pcb;
-  t->stack_no = init_tcb->stack_no;
-  // 因为start_pthread有可能在被Join之后才被运行，因此不能在此赋值
-  // t->joined_by = NULL;
-  // t->joining = NULL;
-  lock_release(&t->join_lock);
+    t->pcb = pcb;
+    t->stack_no = init_tcb->stack_no;
+    // 因为start_pthread有可能在被Join之后才被运行，因此不能在此赋值
+    // t->joined_by = NULL;
+    // t->joining = NULL;
 
   ASSERT(t->pcb != NULL);
 

@@ -133,9 +133,7 @@ struct thread {
   struct process* pcb;        /* Process control block if this thread is a userprog */
   size_t stack_no;            /* 线程的虚拟内存栈编号 */
   struct list_elem prog_elem; /* 进程线程列表元素 */
-  struct lock join_lock;      /* 访问与Join相关字段之前需要获取此锁 */
-  struct thread* joined_by;   /* 指向join当前线程的TCB */
-  struct thread* joining;     /* 指向当前线程正在join的线程的TCB */
+  struct thread* joined_by;   /* 指向join当前线程的TCB（通过禁用中断确保读写原子性） */
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
