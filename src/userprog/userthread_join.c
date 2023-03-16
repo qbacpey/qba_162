@@ -23,13 +23,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Waits for thread with TID to die, if that thread was spawned
-   in the same process and has not been waited on yet. Returns TID on
-   success and returns TID_ERROR on failure immediately, without
-   waiting.
-
-   This function will be implemented in Project 2: Multithreading. For
-   now, it does nothing. */
+/**
+ * @brief Waits for thread with TID to die, if that thread was spawned
+ * in the same process and has not been waited on yet. Returns TID on
+ * success and returns TID_ERROR on failure immediately, without
+ * waiting.
+ * @note 如果`tid`不是主线程，那么当此线程被唤醒之后，就会回收`tid`的内核栈
+ * （用户栈由该线程自己回收）
+ * 
+ * @param tid 
+ * @return tid_t 
+ */
 tid_t pthread_join(tid_t tid) {
   tid_t result = TID_ERROR;
   struct thread *tcb = thread_current();
@@ -45,6 +49,7 @@ tid_t pthread_join(tid_t tid) {
         if (pos->joined_by == NULL) {
           found = true;
           is_main = is_main_thread(pos, pcb);
+          /* 如果目标线程处于`THREAD_ZOMBIE`或者`THREAD_DYING`状态的话，无需阻塞 */
           if(pos->status == THREAD_ZOMBIE || pos->status == THREAD_DYING)
             block_wait = false;
           else
@@ -65,12 +70,13 @@ tid_t pthread_join(tid_t tid) {
   }
   /* 可能出现Join死锁，但这是用户应该处理的事情了 */
   else {
-    intr_disable();
+    DISABLE_INTR({
       pos->joined_by = tcb;
+      /* 如果退出事件为`EXITING_MAIN`，代表它已经执行了将自己的`joiner`唤醒，此时不可Join主线程 */
       if (block_wait && (pcb->exiting != EXITING_MAIN || !is_main)) {
         thread_block();
       }
-    intr_enable();
+    });
   }
 
   rw_lock_acquire(&pcb->threads_lock, RW_WRITER);

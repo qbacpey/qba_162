@@ -1,3 +1,14 @@
+/**
+ * @file process_exit.c
+ * @author your name (you@domain.com)
+ * @brief 本文件中包含进程退出系统的相关函数
+ * @version 0.1
+ * @date 2023-03-16
+ * 
+ * @copyright Copyright (c) 2023
+ * 
+ */
+
 #include "bitmap.h"
 #include "filesys/directory.h"
 #include "filesys/file.h"
@@ -104,9 +115,22 @@ void exit_if_exiting(struct process *pcb, bool is_pthread_exit) {
  *
  * The main thread should not use this function. See
  * pthread_exit_main() below.
- *
- * This function will be implemented in Project 2: Multithreading. For
- * now, it does nothing. */
+ * 
+ * @details 函数执行完毕之后会产生如下三点不变性：
+ * 1.线程状态变为`THREAD_ZOMBIE`；
+ * 2.用户栈被释放；
+ * 3.如果有Joiner，将其唤醒；
+ * 
+ * 如果当前线程在进程的整个运行期间有Joiner，那么线程的TCB必然能被Joiner妥善释放。
+ * 就算没有，由于此函数会将自己移出系统线程链表（确保自己不会再被调度）
+ * 以及将`pcb->active_threads`递减，主线程必然可以被唤醒，到时候清除PCB线程链表中
+ * 所有TCB即可
+ * 
+ * 为什么必须要引入一个`THREAD_ZOMBIE`而不是使用`THREAD_DYING`呢？根本原因在于如果
+ * 线程将自己的状态标记为`THREAD_DYING`，就会将自己移动到系统的Finish Query中。
+ * 调度器每次运行时也会检查上述队列，释放掉其中所有TCB。由于本线程系统允许线程Join
+ * 已经退出的线程，因此如果线程退出之后就将其TCB释放的话，上述功能将不能被实现
+ */
 static void pthread_exit(void) {
   ASSERT(!intr_context());
   struct thread *t = thread_current();
