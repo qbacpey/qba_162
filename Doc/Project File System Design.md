@@ -9,8 +9,8 @@
 + 同步：线程对Cache Buffer的访问应该被同步；
   + 线程向某个Buffer Block中写入数据或从中读取数据时，其他线程不可将该Block Evict回磁盘；
   + 当某个Block被Evict出Buffer的时候，不可以有任何线程正在访问该Block；
-  + 如果某个扇区正在被读取到Buffer中，其他线程不可同时将该Block读取到扇区中；
-  + 当扇区被完全加载到Buffer中之前，线程不可对其进行访问；
+  + 如果某个扇区正在被读取到Buffer中，其他线程不可同时将该B扇区读取到Buffer Cache中；
+  + 扇区被完全加载到Buffer中之前，线程不可对其进行访问；
 + Write-Back Cache：需要使用Dirty Bit将多次磁盘写入操作集中在一起执行；
   + 只有当Block被Evict出Buffer或者系统停机的时候才将Block写入到磁盘；
   + 优化一：可以使用一个`timer_sleep`周期性地将数据写入到磁盘中；
@@ -68,26 +68,25 @@
 上述两个队列中的元素为`struct meta`，用于保存Buffer中各Block的元数据：
 
 ~~~c
-/*  */
 /* Cache Buffer各Block的元数据，用于维护SC队列 */
-struct meta {
-  struct lock meta_lock;     /* 元数据锁 */
-  block_sector_t sector;     /* Block对应扇区的下标 */
-  int worker_cnt;            /* 等待或正在使用Block的线程数 */
-  bool dirty;                /* Dirty Bit */
-  struct rw_lock block_lock; /* Block的RW锁 */
-  uint8_t *block;            /* 元数据对应的Block */
-  struct list_elem elem;     /* 必然位于SC或者Active中 */
-};
+typedef struct meta {
+  struct lock meta_lock;  /* 元数据锁 */
+  block_sector_t sector;  /* Block对应扇区的下标 */
+  int worker_cnt;         /* 等待或正在使用Block的线程数 */
+  struct lock block_lock; /* Block的锁 */
+  bool dirty;             /* Dirty Bit，读写前先获取block_lock */
+  uint8_t *block;         /* 元数据对应的Block */
+  struct list_elem elem;  /* 必然位于SC或者Active中 */
+} meta_t;
 ~~~
 
 其中各字段作用如下：
 
-- `meta_lock`：修改特定字段之前需要获取此锁；
+- `meta_lock`：修改`meta`结构体的字段之前需要获取此锁；
 - `sector`：Block所保存的扇区的扇区号（修改前先获取`meta_lock`）；
 - `worker_cnt`：等待读写或正在读写Block中数据的线程数，用于防止意料之外的Evict（修改前先获取`meta_lock`）；
 - `dirty`：Dirty Bit（修改前先获取`meta_lock`）；
-- `block_lock`：Block的读写锁，读取或写入对应Block中数据之前先获取此锁；
+- `block_lock`：Block的锁，读取或写入对应Block中数据之前先获取此锁；
 - `block`：指向Cache Buffer中与此元数据结构体对应的Block的指针；
 - `elem`：链表字段，由于此结构体必然位于`sc_blocks`或`active_blocks`中，因此可以共用此字段；
 
@@ -265,7 +264,7 @@ struct meta {
 
 - 两条队列：寻找队列元素或者操作队列元素之前需要获取队列共用锁，实际读取其中某个Block时无需获取；
 - `meta`：读取及修改`meta`中非`elem`之外的字段需要先获取`meta_lock`；
-- Cache Buffer：读取Buffer之前需要获取对应Block的读者锁，修改Buffer之前需要获取写者锁；
+- Cache Buffer：读写Buffer之前需要获取对应Block的`block_lock`（位于`meta`中）；
 - Free Map：考虑到所有针对内存中的Free Map的操作都是原子的，因此不需要为Free Map添加同步措施；
 
 还有一些关于锁的额外说明：
@@ -319,8 +318,55 @@ struct meta {
   - 操作读取数据时不可持有任何除`block_lock`之外的锁；
 - 数据读取或写入完毕之后需获取`meta_lock`并将`worker_cnt`递减；
 
-
 ### Rationale
+
+### 总结
+
+支持多线程同时读写的文件系统缓存（Buffer Cache）最多可缓存64个扇区的内容：
+
++ 数据结构：
+  + `active_blocks`与`sc_block`：用于保存缓存中各个缓存块的元数据，个中元素为`meta_t`；
+    + 原身是被VAX计算机所采用的页置换算法：Second-chance List，可以被认为是一种LRU近似算法；
+    + 系统会维护两个队列：绿色队列和黄色队列；
+    + 系统如果想读取某个扇区的数据的话，首先会去绿色队列中查找，如果该扇区已经被加载到了某个位于绿色队列中的缓存块的话，立即返回该缓存块；
+    + 接下来会去黄色队列中查找，如果在其中找到目标缓存块，那么会将该缓存块移动到绿色队列顶部，随后将绿色队列尾部的块移动到黄色队列的顶部；
+    + 如果也没有在黄色队列中找到，那么就会在绿色队列顶部腾出一个缓存块，将目标扇区的数据读取到该缓存块中，随后将绿色队列尾部的块移动到黄色队列顶部，最后将黄色队列尾部的缓存块置换回磁盘中；
+  + `meta_t`：64个Block的元数据，包含引用计数、扇区号，锁等等；
+  + `cache_buffer`：数据的实际缓存位置，整体长度为64 * 512Byte；
+    + `meta_t`中会包含一个指向此数组的指针；
++ 同步措施：
+  + `queue_lock`：查找队列元素、移动队列元素时需持有此锁；
+  + `meta_lock`：读写`meta_t`中字段的时候需持有此锁；
+  + `block_lock`：读写`block`中缓存的数据的时候需要获取此锁；
++ 问题与相关解决方案：
+  + 如何防止当线程正在读写某个缓存块中数据时，该缓存块被置换到文件系统中？
+    + 与每个缓存块对应的`meta_t`中有一个叫做`worker_cnt`的字段，表示现在系统中正在读写该缓存块的线程的数目；
+    + 线程读写缓存块之前，会将`worker_cnt`递增。读写完毕之后，会将该字段递减；
+    + 系统只会将该字段等于零的缓存块置换到磁盘中，以此确保不会干扰其他线程的读写；
+    + 该字段的原子性通过`meta_lock`确保；
+  + 线程检查某个扇区是否被读取到缓存中的流程是（或者说想要读取某个扇区中的内容）？
+    1. 获取队列锁，正向遍历两个缓存块队列：检查是否已经将目标扇区读取到缓存中；
+       - 在绿色队列中找到目标扇区：将其`worker_cnt`递增并返回；
+       - 在黄色队列中找到目标扇区：将其`worker_cnt`递增并将其移动到绿色队列的头部，随后返回；
+    2. 没有在任何一个队列中找到：需要置换某个缓存块；
+       + 反向遍历（从黄色队列尾部开始直到绿色队列首部）两个队列；
+       + 寻找一个可被置换的缓存块（缓存块的`worker_cnt`应当为`0`，表示没有任何线程正在读写其中数据），更新该缓存块元数据的扇区号并递增`worker_cnt`；
+       + 如果该缓存块是Dirty的，将其中数据写回到磁盘中；
+       + 从磁盘中读取目标扇区的数据，写入到该缓存块中；
+       + 根据该缓存块当前所在位置，将其移动到合适的队列中；
+    3. 线程读写缓存块中的内容；
+    4. 递减`worker_cnt`；
+  + 为什么线程遍历缓存块`meta_t`的时候也需要持有队列锁？
+    + 如果当前缓存块不是目标缓存块，那么需要检查队列中下一个缓存块，一样需要获取队列锁；
+    + 如果当前缓存块是目标缓存块，有可能需要将`meta_t`移动到合适的队列中，一样需要获取队列锁；
+    + 相比于重复获取、释放锁的开销，不如长期持有队列锁；
+  + 线程读取扇区内容时的获锁序列是？
+    + 持有队列锁的情况下，遍历队列中所有元素，检查其中字段之前需要获取`meta_lock`；
+    + 如果需要将缓存块中原有内容写入磁盘，或从磁盘中读取目标扇区数据的话，需要获取`block_lock`；
+    + 执行磁盘IO的同时不能持有队列锁
+    + 查找到目标缓存块或将目标扇区读取到缓存块之后，线程需要在持有`meta_lock`和`block_lock`的情况下将`worker_cnt`递增，随后才可以释放上述两把锁。此时缓存块中所保存的数据即是目标扇区中的内容；
+    + 随后，线程必须在获取`block_lock`情况下读写缓存块中的数据；
+    + 如果线程确定不再需要读写缓存块中的数据，那么可以获取`meta_lock`将`worker_cnt`递减；
 
 
 ----------
@@ -341,23 +387,23 @@ struct meta {
 
 需要实现两个数据结构：
 
-- `indirect_blk_t`；
+- `idr_block`；
 
-+ `dbindirect_blk_t`；
++ `dbi_block_t`；
 
-#### `indirect_blk_t`
+#### `idr_block`
 
 间接块，大小为`BLOCK_SECTOR_SIZE`，保存着一个`block_sector_t[128]`数组：
 
 ~~~c
-struct indirect_blk_t {
+struct idr_block {
    block_sector_t direct_ary[128];
-};
+} idr_block_t;
 ~~~
 
-#### `dbindirect_blk_t`
+#### `dbi_block_t`
 
-二级间接块，大小为`BLOCK_SECTOR_SIZE`，保存着一个`indirect_blk_t[128]`数组：
+二级间接块，大小为`BLOCK_SECTOR_SIZE`，保存着一个`idr_block[128]`数组：
 
 ~~~c
 typedef struct dbi_blk {
@@ -370,14 +416,14 @@ typedef struct dbi_blk {
 Inode的底层表示，创建时最好使用`calloc`申请空间：
 
 ~~~c
-/*  */ 
 struct inode_disk {
   off_t length;                                 /* File size in bytes. */
   unsigned magic;                               /* Magic number. */
+  enum file_type type;                          /* 文件类型 */
   block_sector_t dr_arr[INODE_DIRECT_COUNT];    /* 直接块的下标 */
   block_sector_t idr_arr[INODE_INDIRECT_COUNT]; /* 间接块的下标 */
   block_sector_t dbi_arr;                       /* 二级间接块的下标 */
-  uint32_t unused[126 - INODE_DIRECT_COUNT - INODE_INDIRECT_COUNT - INODE_DB_INDIRECT_COUNT]; /* Not used. */
+  uint32_t unused[125 - INODE_DIRECT_COUNT - INODE_INDIRECT_COUNT - INODE_DB_INDIRECT_COUNT]; /* Not used. */
 };
 ~~~
 
@@ -483,7 +529,7 @@ struct inode {
 
 ##### 间接块Resize函数
 
-> 函数功能：接收一个`off_t`，计算保存这个`off_t`需要多少直接块，记作`n`，同时修改参数指针指向的`indirect_blk_t`。执行失败时确保不会新分配任何扇区
+> 函数功能：接收一个`off_t`，计算保存这个`off_t`需要多少直接块，记作`n`，同时修改参数指针指向的`idr_block`。执行失败时确保不会新分配任何扇区
 >
 > + 根据“实际分配旗标”，使用Sparse ﬁles扇区或空余扇区填满`[0, n)`：
 >   + `true`：间接块中所有扇区指针都来自`free_map`，不使用Sparse ﬁles扇区；
@@ -498,7 +544,7 @@ struct inode {
 >
 > 函数参数：
 >
-> + `indirect_blk_t *`：一个指向Cache Buffer的指针，内容为间接块的`meta`；
+> + `idr_block *`：一个指向Cache Buffer的指针，内容为间接块的`meta`；
 > + 实际分配旗标：使用Sparse ﬁles扇区或空余扇区填充新扇区；
 >   + 执行过程中如果申请失败，需要将新申请的所有扇区都释放；
 > + `off_t`：间接块的新大小，用于计算需要多少个直接块存放此值；
@@ -512,7 +558,7 @@ struct inode {
 
 + Caller申请新扇区并调用Evict Meta函数腾出一个新的`meta`，将新的扇区下标赋值给`meta`；
 + 确保读写`meta`时同步（持有读者锁之后再调用此函数）；
-+ 调用此函数，利用`meta.block`将Cache Buffer当成`indirect_blk_t`并对其进行修改（写入完毕需要递减`worker_cnt`）；
++ 调用此函数，利用`meta.block`将Cache Buffer当成`idr_block`并对其进行修改（写入完毕需要递减`worker_cnt`）；
   + 如果成功，重复此过程直到完成申请目标；
   + 如果失败：
     + 首先释放该`meta`的扇区（操作Free Map即可）；
@@ -583,8 +629,45 @@ struct inode {
 + 递增Inode的`worker_cnt`：防止在线程延长文件时，Inode被意外Evict回磁盘之后，其他线程将该Inode读取到Cache Buffer中并对其进行拓展，使两个线程同时延长一个文件；
 + 获取Inode的的写者锁：防止在线程延长文件时，其他线程执行扇区查找算法，将该Inode读取到Cache Buffer中并对其进行拓展，使两个线程同时延长一个文件；
 
-
 ### Rationale
+
+### 总结
+
+要求：
+
++ 文件索引树；
+  + 文件各Block可分散在磁盘各处，无需连续；
+  + 结构类似BSD，一个扇区大小为512 Byte，需支持大小至少为8MiB的文件；
+  + `inode_disk`（也就是Inode被保存在磁盘时的数据结构）中包含三种不同的指针区域（这里的指针和通常的定义有所不同，它们的值并不是内存地址，而是扇区标号），相互之间形成了某种嵌套关系：
+    + 直接指针区域：直接保存着数据所在扇区的扇区号；
+    + 间接指针区域：保存着间接块所在的扇区号，间接块是一个被当作直接指针区域的扇区；
+    + 二级间接指针区域：保存着二级间接块所在的扇区号，二级间接块是一个被当作间接指针区域的扇区；
++ 文件可拓展：
+  + 如果尝试向文件现有EOF之后的位置执行写入操作，文件将被自动拓展到对应大小；
++ 处理磁盘空间不足时的情况：
+  + 如果文件拓展失败，那么文件Inode中任何内容都不应该被修改；
+  + 换而言之，如果在拓展文件时剩余可用扇区数量不足，那么需要释放掉所有新分配的扇区，回滚所有修改操作；
+
+实现方式：
+
++ 难点在于扩大文件时所采用的接口以及代码复用：
+  + 同一个Inode中有三种不同的指针，指针各自指向的数据结构各有不同；
+  + 文件原来的EOF可能位于这三个区域中的任意一个，需要根据文件新EOF的所在位置与旧EOF的所在位置进行分类讨论，总共需要处理6种不同的情况；
+  + 如果在拓展文件时执行失败，就需要根据旧EOF和新EOF的相对位置，将文件索引树的结构回滚到文件未被拓展之间的状态，这同样也需要根据之间的相对位置的分类讨论结果执行不同的行为；
+  + 由于三种不同的指针区域之间实际上存在着递归嵌套的关系（比如说二级间接块实际是一个和Inode中间接块指针区域相同的数据结构），因此需要设计较为通用的接口；
++ 解决方案：所有函数都采用了同一种接口设计的语义，都是”对于一个指针区域，给定期望的扇区数目，表示在此函数执行过后，该区域应当包含的扇区的数目“：
+  + 用于操作直接块指针区域的函数：`resize_direct_ptr_portion`：
+    + 语义是：将指定直接块指针区域中的扇区数目修改为期望值
+      + 如果已分配扇区数小于期望值，分配更多扇区；
+      + 如果已分配扇区数大于期望值，将多余的扇区释放；
+    + 如果过程中分配失败，保证指针区域被回滚为调用时的内容；
+  + 用于操作间接块指针区域的函数：`alloc_indirect_portion`：
+    + 语义和直接块指针区域操作函数类似，不过是让指定区域的扇区数目增加为期望值扇区数目，不能用于减少该区域的扇区数目；
+    + 函数有一个递归调用的语义，如果函数被执行时发现参数给定的间接块指针区域不能容纳期望的扇区数目，那么会分配一个二级间接块，尝试将溢出的扇区分配在其中；
+    + 这里为什么说是递归语义呢？主要是由于间接块指针区域实际就是一个二级间接块，因此可以使用当前函数一并处理其中的分配事宜；
+  + 回滚分配函数：`release_full_indirect_block`：
+    + 用于将某个间接块区域中的所有间接块以及直接块全部释放；
+    + 除了释放数据本身的扇区之外，还需要释放直接块和间接块所占据的扇区；
 
 
 ----------
